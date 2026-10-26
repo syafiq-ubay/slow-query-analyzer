@@ -1,0 +1,31 @@
+services:
+  elastic-export:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: slow-query-analyzer:latest
+    volumes:
+      - ./:/workspace
+      - ./main.py:/app/main.py:ro
+      - ./elastic_client.py:/app/elastic_client.py:ro
+      - ./exporter.py:/app/exporter.py:ro
+      - ./correlator.py:/app/correlator.py:ro
+    environment:
+      ELASTIC_URL: ${ELASTIC_URL:-https://elastic.benihcitraasia.co.id}
+      ELASTIC_USER: ${ELASTIC_USER:-}
+      ELASTIC_PASS: ${ELASTIC_PASS:-}
+      MYSQL_DATA_VIEW_ID: ${MYSQL_DATA_VIEW_ID:-44d4edd4-7529-40a5-ac59-616e7d5bfd6f}
+      NGINX_DATA_VIEW_ID: ${NGINX_DATA_VIEW_ID:-a4bd8dac-e16e-4d4f-a48a-852860ae99ad}
+      START_TIME: ${START_TIME:-auto}
+      END_TIME: ${END_TIME:-now}
+      INPUT_DIR: ${INPUT_DIR:-input}
+      MYSQL_FILTER: ${MYSQL_FILTER:-}
+      NGINX_FILTER: ${NGINX_FILTER:-}
+    command:
+      - mysql
+      - --start-time
+      - ${START_TIME:-auto}
+      - --end-time
+      - ${END_TIME:-now}
+      - --output
+      - output/mysql_slow_queries.xlsx

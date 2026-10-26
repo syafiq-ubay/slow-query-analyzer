@@ -1,0 +1,19 @@
+# Ignore large data files from Docker build context
+*.log
+*.csv
+*.xlsx
+*.pdf
+.env
+output/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Git and IDE
+.git/
+.gitignore
+.idea/
+.vscode/

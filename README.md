@@ -1,0 +1,97 @@
+# Elastic Slow Query and Nginx Export
+
+Seluruh data diambil dari Elasticsearch/Kibana; tidak ada pembacaan slow query dari file lokal atau konfigurasi YAML.
+
+## Sumber MySQL dari Elastic
+
+Data view MySQL menggunakan ID dari tautan Discover:
+`44d4edd4-7529-40a5-ac59-616e7d5bfd6f`
+
+Kolom Excel MySQL mengikuti urutan berikut:
+
+`@timestamp`, `user`, `schema`, `query_time`, `lock_time`, `rows_examined`, `rows_sent`, `query`
+
+```bash
+docker compose run --rm elastic-export mysql \
+  --start-time "2026-10-24T00:00:00Z" \
+  --end-time "2026-10-24T23:59:59Z" \
+  --output output/mysql_slow_queries.xlsx
+```
+
+Secara default, `START_TIME=auto` mencari tanggal paling awal dari kolom timestamp pada file CSV/Excel di folder `input/`, lalu mengambil data hingga `END_TIME` (default `now`). Nama kolom yang dikenali: `@timestamp`, `mysql_@timestamp`, `http_timestamp`, `timestamp`, `date`, dan `datetime`. Timestamp format ISO dan format ekspor `Oct 26, 2026 @ 08:56:50.238` didukung. Jika tidak ditemukan nilai timestamp yang bisa dibaca, pengambilan dimulai dari awal hari ini berdasarkan zona waktu Asia/Jakarta. Timestamp tanpa zona waktu pada file dianggap sebagai waktu Asia/Jakarta. Secara default semua record pada rentang tersebut diambil. Gunakan `--max-records 10000` jika ingin membatasi hingga 10.000 record per sumber; `--max-records 0` berarti tanpa batas.
+
+## Sumber Nginx dari Elastic
+
+```bash
+docker compose run --rm elastic-export nginx \
+  --start-time "2026-10-24T00:00:00Z" \
+  --end-time "2026-10-24T23:59:59Z" \
+  --exclude-code 404 \
+  --exclude-code 499 \
+  --output output/nginx_access_logs.xlsx
+```
+
+`--max-records` membatasi jumlah hasil. Nilai `0` berarti tidak dibatasi. `--exclude-code` dapat diulang; kode tersebut dikecualikan pada query Elasticsearch.
+
+## Ambil kedua sumber dan gabungkan
+
+Timestamp pada file Excel ditampilkan dalam zona waktu Asia/Jakarta dengan format `MMM DD, YYYY @ HH:mm:ss.SSS`, contohnya `Oct 26, 2026 @ 08:56:50.238`. Mode `merge` memasangkan record berdasarkan waktu yang sama hingga detik, sesuai tanggal tanpa milidetik; jika beberapa record Nginx memiliki waktu yang sama, semuanya menghasilkan pasangan baris.
+
+Hasil diurutkan dari waktu terbaru ke terlama, sehingga record terbaru muncul di bagian atas.
+
+```bash
+docker compose run --rm elastic-export merge \
+  --start-time "2026-10-24T00:00:00Z" \
+  --end-time "2026-10-24T23:59:59Z" \
+  --exclude-code 404 \
+  --output output/merge_logs.xlsx
+```
+
+Hasil merge memiliki satu baris untuk setiap pasangan timestamp yang sama. Record MySQL tanpa pasangan tetap ditampilkan dengan kolom Nginx kosong. `--max-records` berlaku terpisah untuk masing-masing data view.
+
+## Kredensial dan konfigurasi
+
+Salin `.env.example` menjadi `.env`, lalu sesuaikan koneksi dan filter. Docker Compose membaca nilai konfigurasi dari `.env`:
+
+Environment variable opsional:
+
+| Nama | Default | Fungsi |
+|---|---|---|
+| `ELASTIC_URL` | `https://elastic.benihcitraasia.co.id` | URL Kibana/Elastic |
+| `ELASTIC_USER` | kosong | Username Basic Auth |
+| `ELASTIC_PASS` | kosong | Password Basic Auth |
+| `MYSQL_DATA_VIEW_ID` | `44d4edd4-7529-40a5-ac59-616e7d5bfd6f` | Data view slow query MySQL |
+| `NGINX_DATA_VIEW_ID` | `a4bd8dac-e16e-4d4f-a48a-852860ae99ad` | Data view Nginx |
+| `START_TIME` | `auto` | Waktu mulai, atau `auto` untuk membaca file slow query |
+| `END_TIME` | `now` | Batas akhir waktu |
+| `INPUT_DIR` | `input` | Folder berisi file CSV/Excel acuan tanggal |
+| `MYSQL_FILTER` | kosong | Filter Elasticsearch `query_string` tambahan MySQL, misalnya `schema: shop` |
+| `NGINX_FILTER` | kosong | Filter Elasticsearch `query_string` tambahan Nginx, misalnya `code: 500` |
+
+Filter dapat dikombinasikan dengan pengecualian status `--exclude-code` pada mode Nginx/merge.
+
+Sertifikat HTTPS diverifikasi. Ekspor menggunakan pagination per halaman untuk membatasi penggunaan memori dan tidak meminta total-hit count dari Elasticsearch.
+
+## Docker
+
+```bash
+docker compose build
+
+# Export MySQL
+docker compose run --build --rm elastic-export mysql \
+  --start-time "2026-10-24T00:00:00Z" \
+  --end-time "2026-10-24T23:59:59Z"
+
+# Export Nginx, kecualikan HTTP 404
+docker compose run --build --rm elastic-export nginx \
+  --start-time "2026-10-24T00:00:00Z" \
+  --end-time "2026-10-24T23:59:59Z" \
+  --exclude-code 404
+
+# Fetch kedua data view dan hasilkan Excel gabungan
+docker compose run --build --rm elastic-export merge \
+  --start-time "2026-10-24T00:00:00Z" \
+  --end-time "2026-10-24T23:59:59Z"
+```
+
+Folder proyek di-mount ke container; file hasil tersedia pada folder `output/` di host. Jalankan `docker compose run --rm elastic-export --help` untuk melihat mode, atau `docker compose run --rm elastic-export mysql --help` untuk bantuan mode tertentu. Jangan jalankan `python3 main.py` langsung di host karena dependensi aplikasi disediakan di dalam image Docker.
