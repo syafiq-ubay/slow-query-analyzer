@@ -59,10 +59,22 @@ def _add_connection_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _add_nginx_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--exclude-code", action="append", default=[],
-                        type=_http_status_code, metavar="HTTP_CODE",
-                        help="Exclude an Nginx HTTP status code; may be repeated.")
+def _add_nginx_options(
+    parser: argparse.ArgumentParser,
+    *,
+    default_exclude_codes: List[str] | None = None,
+) -> None:
+    help_text = "Exclude an Nginx HTTP status code; may be repeated."
+    if default_exclude_codes:
+        help_text += f" Defaults: {', '.join(default_exclude_codes)}."
+    parser.add_argument(
+        "--exclude-code",
+        action="append",
+        default=default_exclude_codes or [],
+        type=_http_status_code,
+        metavar="HTTP_CODE",
+        help=help_text,
+    )
 
 
 def _parse_args() -> argparse.Namespace:
@@ -97,7 +109,10 @@ def _parse_args() -> argparse.Namespace:
     )
     _add_time_range(merge_parser)
     _add_connection_options(merge_parser)
-    _add_nginx_options(merge_parser)
+    _add_nginx_options(
+        merge_parser,
+        default_exclude_codes=["401", "403", "499"],
+    )
     merge_parser.add_argument("--mysql-data-view-id", default=DEFAULT_MYSQL_DATA_VIEW_ID)
     merge_parser.add_argument("--nginx-data-view-id", default=DEFAULT_NGINX_DATA_VIEW_ID)
     merge_parser.add_argument("--output", default="output/merge_logs.xlsx")

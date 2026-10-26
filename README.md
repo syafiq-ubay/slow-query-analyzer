@@ -47,7 +47,7 @@ docker compose run --rm elastic-export merge \
   --output output/merge_logs.xlsx
 ```
 
-Hasil merge memiliki satu baris untuk setiap pasangan timestamp yang sama. Record MySQL tanpa pasangan tetap ditampilkan dengan kolom Nginx kosong. `--max-records` berlaku terpisah untuk masing-masing data view.
+Saat merge, status Nginx `401`, `403`, dan `499` dikecualikan secara default. Tambahkan `--exclude-code` berulang kali untuk mengecualikan status lain. Hasil merge memiliki satu baris untuk setiap pasangan timestamp yang sama. Record MySQL tanpa pasangan tetap ditampilkan dengan kolom Nginx kosong. `--max-records` berlaku terpisah untuk masing-masing data view.
 
 ## Kredensial dan konfigurasi
 
