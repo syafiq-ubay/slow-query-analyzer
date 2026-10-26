@@ -10,11 +10,11 @@ from zoneinfo import ZoneInfo
 
 from correlator import correlate_all
 from elastic_client import (
-    DEFAULT_ELASTIC_PASS,
-    DEFAULT_ELASTIC_URL,
-    DEFAULT_ELASTIC_USER,
-    DEFAULT_MYSQL_DATA_VIEW_ID,
-    DEFAULT_NGINX_DATA_VIEW_ID,
+    ELASTIC_PASS,
+    ELASTIC_URL,
+    ELASTIC_USER,
+    MYSQL_DATA_VIEW_ID,
+    NGINX_DATA_VIEW_ID,
     ElasticLogClient,
 )
 from exporter import (
@@ -46,11 +46,6 @@ def _add_time_range(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_connection_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--elastic-url",
-        default=DEFAULT_ELASTIC_URL,
-        help="Elastic/Kibana URL (default: ELASTIC_URL environment variable).",
-    )
     parser.add_argument(
         "--max-records",
         type=int,
@@ -98,22 +93,12 @@ def _parse_args() -> argparse.Namespace:
     mysql_parser = modes.add_parser("mysql", help="Export MySQL slow queries from Elastic.")
     _add_time_range(mysql_parser)
     _add_connection_options(mysql_parser)
-    mysql_parser.add_argument(
-        "--data-view-id",
-        default=DEFAULT_MYSQL_DATA_VIEW_ID,
-        help="MySQL slow-query data view ID from the Discover URL.",
-    )
     mysql_parser.add_argument("--output", default="output/mysql_slow_queries.xlsx")
 
     nginx_parser = modes.add_parser("nginx", help="Export Nginx access logs from Elastic.")
     _add_time_range(nginx_parser)
     _add_connection_options(nginx_parser)
     _add_nginx_options(nginx_parser, default_exclude_codes=configured_exclude_codes)
-    nginx_parser.add_argument(
-        "--data-view-id",
-        default=DEFAULT_NGINX_DATA_VIEW_ID,
-        help="Nginx access-log data view ID.",
-    )
     nginx_parser.add_argument("--output", default="output/nginx_access_logs.xlsx")
 
     merge_parser = modes.add_parser(
@@ -122,21 +107,25 @@ def _parse_args() -> argparse.Namespace:
     _add_time_range(merge_parser)
     _add_connection_options(merge_parser)
     _add_nginx_options(merge_parser, default_exclude_codes=configured_exclude_codes)
-    merge_parser.add_argument("--mysql-data-view-id", default=DEFAULT_MYSQL_DATA_VIEW_ID)
-    merge_parser.add_argument("--nginx-data-view-id", default=DEFAULT_NGINX_DATA_VIEW_ID)
     merge_parser.add_argument("--output", default="output/merge_logs.xlsx")
 
     args = parser.parse_args()
     if args.max_records < 0:
         parser.error("--max-records cannot be negative; use 0 for unlimited.")
+    if not ELASTIC_URL:
+        parser.error("Set ELASTIC_URL in .env before running the exporter.")
+    if args.mode in ("mysql", "merge") and not MYSQL_DATA_VIEW_ID:
+        parser.error("Set MYSQL_DATA_VIEW_ID in .env before running this mode.")
+    if args.mode in ("nginx", "merge") and not NGINX_DATA_VIEW_ID:
+        parser.error("Set NGINX_DATA_VIEW_ID in .env before running this mode.")
     return args
 
 
 def _elastic_client(args: argparse.Namespace) -> ElasticLogClient:
     return ElasticLogClient(
-        base_url=args.elastic_url,
-        username=DEFAULT_ELASTIC_USER,
-        password=DEFAULT_ELASTIC_PASS,
+        base_url=ELASTIC_URL,
+        username=ELASTIC_USER,
+        password=ELASTIC_PASS,
     )
 
 
@@ -173,7 +162,7 @@ def main() -> None:
     if args.mode == "mysql":
         records = _stream_records(
             client,
-            data_view_id=args.data_view_id,
+            data_view_id=MYSQL_DATA_VIEW_ID,
             start_time=args.start_time,
             end_time=args.end_time,
             fields=MYSQL_FIELDS,
@@ -185,7 +174,7 @@ def main() -> None:
     elif args.mode == "nginx":
         records = _stream_records(
             client,
-            data_view_id=args.data_view_id,
+            data_view_id=NGINX_DATA_VIEW_ID,
             start_time=args.start_time,
             end_time=args.end_time,
             fields=NGINX_FIELDS,
@@ -198,7 +187,7 @@ def main() -> None:
     else:
         mysql_records = _stream_records(
             client,
-            data_view_id=args.mysql_data_view_id,
+            data_view_id=MYSQL_DATA_VIEW_ID,
             start_time=args.start_time,
             end_time=args.end_time,
             fields=MYSQL_FIELDS,
@@ -206,7 +195,7 @@ def main() -> None:
         )
         nginx_records = _stream_records(
             client,
-            data_view_id=args.nginx_data_view_id,
+            data_view_id=NGINX_DATA_VIEW_ID,
             start_time=args.start_time,
             end_time=args.end_time,
             fields=NGINX_FIELDS,

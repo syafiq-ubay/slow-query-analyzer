@@ -43,18 +43,11 @@ _load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ELASTIC_URL = os.getenv(
-    "ELASTIC_URL", "https://www.elastic.co/"
-)
-DEFAULT_ELASTIC_USER = os.getenv("ELASTIC_USER", "")
-DEFAULT_ELASTIC_PASS = os.getenv("ELASTIC_PASS", "")
-DEFAULT_MYSQL_DATA_VIEW_ID = os.getenv(
-    "MYSQL_DATA_VIEW_ID", "44d4edd4-7529-40a5-ac59-616e7d5bfd6f"
-)
-DEFAULT_NGINX_DATA_VIEW_ID = os.getenv(
-    "NGINX_DATA_VIEW_ID",
-    os.getenv("DATA_VIEW_ID", "a4bd8dac-e16e-4d4f-a48a-852860ae99ad"),
-)
+ELASTIC_URL = os.getenv("ELASTIC_URL", "")
+ELASTIC_USER = os.getenv("ELASTIC_USER", "")
+ELASTIC_PASS = os.getenv("ELASTIC_PASS", "")
+MYSQL_DATA_VIEW_ID = os.getenv("MYSQL_DATA_VIEW_ID", "")
+NGINX_DATA_VIEW_ID = os.getenv("NGINX_DATA_VIEW_ID", "")
 
 SEARCH_PAGE_SIZE = 1000
 
@@ -62,9 +55,9 @@ SEARCH_PAGE_SIZE = 1000
 class ElasticLogClient:
     def __init__(
         self,
-        base_url: str = DEFAULT_ELASTIC_URL,
-        username: str = DEFAULT_ELASTIC_USER,
-        password: str = DEFAULT_ELASTIC_PASS,
+        base_url: str = ELASTIC_URL,
+        username: str = ELASTIC_USER,
+        password: str = ELASTIC_PASS,
         verify_ssl: bool = True,
     ) -> None:
         self.base_url = base_url.rstrip("/")

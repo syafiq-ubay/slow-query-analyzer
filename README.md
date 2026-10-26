@@ -4,8 +4,7 @@ Seluruh data diambil dari Elasticsearch/Kibana; tidak ada pembacaan slow query d
 
 ## Sumber MySQL dari Elastic
 
-Data view MySQL menggunakan ID dari tautan Discover:
-`44d4edd4-7529-40a5-ac59-616e7d5bfd6f`
+ID data view MySQL dan Nginx dibaca dari `.env`.
 
 Kolom Excel MySQL mengikuti urutan berikut:
 
@@ -57,11 +56,11 @@ Environment variable opsional:
 
 | Nama | Default | Fungsi |
 |---|---|---|
-| `ELASTIC_URL` | `https://elastic.benihcitraasia.co.id` | URL Kibana/Elastic |
+| `ELASTIC_URL` | wajib diisi | URL Kibana/Elastic |
 | `ELASTIC_USER` | kosong | Username Basic Auth |
 | `ELASTIC_PASS` | kosong | Password Basic Auth |
-| `MYSQL_DATA_VIEW_ID` | `44d4edd4-7529-40a5-ac59-616e7d5bfd6f` | Data view slow query MySQL |
-| `NGINX_DATA_VIEW_ID` | `a4bd8dac-e16e-4d4f-a48a-852860ae99ad` | Data view Nginx |
+| `MYSQL_DATA_VIEW_ID` | wajib diisi | ID data view slow query MySQL |
+| `NGINX_DATA_VIEW_ID` | wajib diisi | ID data view Nginx |
 | `START_TIME` | `auto` | Waktu mulai, atau `auto` untuk membaca file slow query |
 | `END_TIME` | `now` | Batas akhir waktu |
 | `INPUT_DIR` | `input` | Folder berisi file CSV/Excel acuan tanggal |

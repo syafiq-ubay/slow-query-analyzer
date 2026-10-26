@@ -4,6 +4,8 @@
 *.xlsx
 *.pdf
 .env
+.env.*
+!.env.example
 
 # Ignore folder contents
 /output/*
