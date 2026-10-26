@@ -1,2 +1,22 @@
-/.env
-/__pycache__
+# Ignore large data files from Docker build context
+*.log
+*.csv
+*.xlsx
+*.pdf
+.env
+
+# Ignore folder contents
+/output/*
+/input/*
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Git and IDE
+.git/
+.gitignore
+.idea/
+.vscode/

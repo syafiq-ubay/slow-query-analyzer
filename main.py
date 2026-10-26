@@ -81,6 +81,18 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Export MySQL slow-query and Nginx records from Elasticsearch."
     )
+    configured_exclude_codes = [
+        code.strip()
+        for code in os.getenv("NGINX_EXCLUDE_CODES", "").split(",")
+        if code.strip()
+    ]
+    try:
+        configured_exclude_codes = [
+            _http_status_code(code) for code in configured_exclude_codes
+        ]
+    except argparse.ArgumentTypeError as exc:
+        parser.error(f"Invalid NGINX_EXCLUDE_CODES: {exc}")
+
     modes = parser.add_subparsers(dest="mode", required=True)
 
     mysql_parser = modes.add_parser("mysql", help="Export MySQL slow queries from Elastic.")
@@ -96,7 +108,7 @@ def _parse_args() -> argparse.Namespace:
     nginx_parser = modes.add_parser("nginx", help="Export Nginx access logs from Elastic.")
     _add_time_range(nginx_parser)
     _add_connection_options(nginx_parser)
-    _add_nginx_options(nginx_parser)
+    _add_nginx_options(nginx_parser, default_exclude_codes=configured_exclude_codes)
     nginx_parser.add_argument(
         "--data-view-id",
         default=DEFAULT_NGINX_DATA_VIEW_ID,
@@ -109,10 +121,7 @@ def _parse_args() -> argparse.Namespace:
     )
     _add_time_range(merge_parser)
     _add_connection_options(merge_parser)
-    _add_nginx_options(
-        merge_parser,
-        default_exclude_codes=["401", "403", "499"],
-    )
+    _add_nginx_options(merge_parser, default_exclude_codes=configured_exclude_codes)
     merge_parser.add_argument("--mysql-data-view-id", default=DEFAULT_MYSQL_DATA_VIEW_ID)
     merge_parser.add_argument("--nginx-data-view-id", default=DEFAULT_NGINX_DATA_VIEW_ID)
     merge_parser.add_argument("--output", default="output/merge_logs.xlsx")

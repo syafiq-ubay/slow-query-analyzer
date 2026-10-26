@@ -47,7 +47,7 @@ docker compose run --rm elastic-export merge \
   --output output/merge_logs.xlsx
 ```
 
-Saat merge, status Nginx `401`, `403`, dan `499` dikecualikan secara default. Tambahkan `--exclude-code` berulang kali untuk mengecualikan status lain. Hasil merge memiliki satu baris untuk setiap pasangan timestamp yang sama. Record MySQL tanpa pasangan tetap ditampilkan dengan kolom Nginx kosong. `--max-records` berlaku terpisah untuk masing-masing data view.
+Status Nginx yang dikecualikan secara default diatur lewat `NGINX_EXCLUDE_CODES` di `.env`. Isi dengan daftar dipisahkan koma, misalnya `401,403,499`; jika kosong, tidak ada status yang otomatis dikecualikan. Opsi `--exclude-code` tetap bisa dipakai untuk menambahkan pengecualian saat menjalankan perintah. Pengaturan ini berlaku pada mode `nginx` dan `merge`. Hasil merge memiliki satu baris untuk setiap pasangan timestamp yang sama. Record MySQL tanpa pasangan tetap ditampilkan dengan kolom Nginx kosong. `--max-records` berlaku terpisah untuk masing-masing data view.
 
 ## Kredensial dan konfigurasi
 
@@ -67,6 +67,7 @@ Environment variable opsional:
 | `INPUT_DIR` | `input` | Folder berisi file CSV/Excel acuan tanggal |
 | `MYSQL_FILTER` | kosong | Filter Elasticsearch `query_string` tambahan MySQL, misalnya `schema: shop` |
 | `NGINX_FILTER` | kosong | Filter Elasticsearch `query_string` tambahan Nginx, misalnya `code: 500` |
+| `NGINX_EXCLUDE_CODES` | kosong | Status HTTP Nginx yang dikecualikan otomatis, pisahkan dengan koma |
 
 Filter dapat dikombinasikan dengan pengecualian status `--exclude-code` pada mode Nginx/merge.
 
@@ -76,6 +77,9 @@ Sertifikat HTTPS diverifikasi. Ekspor menggunakan pagination per halaman untuk m
 
 ```bash
 docker compose build
+
+# Merge dengan default env
+docker compose run --build --rm elastic-export merge
 
 # Export MySQL
 docker compose run --build --rm elastic-export mysql \

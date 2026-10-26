@@ -21,6 +21,7 @@ services:
       INPUT_DIR: ${INPUT_DIR:-input}
       MYSQL_FILTER: ${MYSQL_FILTER:-}
       NGINX_FILTER: ${NGINX_FILTER:-}
+      NGINX_EXCLUDE_CODES: ${NGINX_EXCLUDE_CODES:-}
     command:
       - mysql
       - --start-time
