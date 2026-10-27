@@ -71,10 +71,13 @@ Environment variable opsional:
 | `END_TIME` | `now` | Batas akhir waktu |
 | `INPUT_DIR` | `input` | Folder berisi file CSV/Excel acuan tanggal |
 | `MYSQL_FILTER` | kosong | Filter Elasticsearch `query_string` tambahan MySQL, misalnya `schema: shop` |
+| `MYSQL_QUERY_FORMAT` | `short` | Bentuk query MySQL di Excel: `full` untuk SQL mentah, `short` untuk pola query, atau `super_short` untuk label operasi saja |
 | `NGINX_FILTER` | kosong | Filter Elasticsearch `query_string` tambahan Nginx, misalnya `code: 500` |
 | `NGINX_EXCLUDE_CODES` | kosong | Status HTTP Nginx yang dikecualikan otomatis, pisahkan dengan koma |
 
 Filter dapat dikombinasikan dengan pengecualian status `--exclude-code` pada mode Nginx/merge.
+
+`MYSQL_QUERY_FORMAT=short` mengambil `query_normalized` dari Elastic jika tersedia; jika tidak, nilai string dan angka pada SQL diganti placeholder agar query serupa memiliki pola yang sama. Query pendek dibatasi 1.200 karakter. `MYSQL_QUERY_FORMAT=super_short` hanya menyimpan perintah utama seperti `SELECT`, `INSERT`, `UPDATE`, atau `DELETE`. Gunakan `MYSQL_QUERY_FORMAT=full` untuk menyimpan SQL mentah. Pengaturan ini berlaku pada mode `mysql` dan `merge`.
 
 Sertifikat HTTPS diverifikasi. Ekspor menggunakan pagination per halaman untuk membatasi penggunaan memori dan tidak meminta total-hit count dari Elasticsearch.
 

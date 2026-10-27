@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 from collections import defaultdict
+import re
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 
@@ -66,7 +67,7 @@ def _merged_row(
         "mysql_query_type": mysql.get("query_type", ""),
         "mysql_rows_examined": mysql.get("rows_examined", ""),
         "mysql_rows_sent": mysql.get("rows_sent", ""),
-        "mysql_query": mysql.get("query_normalized") or mysql.get("query", ""),
+        "mysql_query": mysql.get("query", ""),
         "http_timestamp": nginx.get("@timestamp", "") if nginx else "",
         "http_method": nginx.get("method", "") if nginx else "",
         "http_status_code": nginx.get("code", "") if nginx else "",
@@ -78,3 +79,82 @@ def _merged_row(
         "http_referer": nginx.get("referer", "") if nginx else "",
         "http_user_agent": nginx.get("agent", "") if nginx else "",
     }
+
+
+_SQL_STRING = re.compile(r"'(?:''|\\.|[^'])*'|\"(?:\"\"|\\.|[^\"])*\"")
+_SQL_NUMBER = re.compile(r"\b(?:0x[0-9a-f]+|0b[01]+|\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b", re.IGNORECASE)
+_SQL_IN_VALUES = re.compile(r"\bIN\s*\(\s*\?(?:\s*,\s*\?)*\s*\)", re.IGNORECASE)
+_SQL_OPERATIONS = {
+    "SELECT", "INSERT", "REPLACE", "UPDATE", "DELETE", "CREATE", "ALTER",
+    "DROP", "TRUNCATE", "RENAME", "BEGIN", "START", "COMMIT", "ROLLBACK",
+    "SAVEPOINT", "RELEASE", "CALL", "EXECUTE", "SHOW", "DESCRIBE", "EXPLAIN",
+}
+
+
+def query_operation(query: Any) -> str:
+    """Return the top-level SQL operation, or OTHER if it is not recognized."""
+    if query is None:
+        return "OTHER"
+    text = str(query)
+    text = re.sub(r"/\*[\s\S]*?\*/", " ", text)
+    text = re.sub(r"--[^\r\n]*|\#[^\r\n]*", " ", text)
+    depth = 0
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                if index + 1 < len(text) and text[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = ""
+            index += 1
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+            index += 1
+            continue
+        if char == ")":
+            depth = max(0, depth - 1)
+            index += 1
+            continue
+        if depth == 0 and (char.isalpha() or char == "_"):
+            end = index + 1
+            while end < len(text) and (text[end].isalnum() or text[end] == "_"):
+                end += 1
+            word = text[index:end].upper()
+            if word in _SQL_OPERATIONS:
+                return word
+            index = end
+            continue
+        index += 1
+    return "OTHER"
+
+
+def normalize_query(query: Any, *, max_length: int = 1200) -> str:
+    """Return a compact SQL shape by replacing literal values with placeholders."""
+    if query is None:
+        return ""
+    text = str(query).strip()
+    if not text:
+        return ""
+
+    # Replace literals before stripping comments so comment-like text inside a
+    # quoted value is retained as a single placeholder.
+    text = _SQL_STRING.sub("?", text)
+    text = re.sub(r"/\*[\s\S]*?\*/", " ", text)
+    text = re.sub(r"--[^\r\n]*|\#[^\r\n]*", " ", text)
+    text = _SQL_NUMBER.sub("?", text)
+    text = _SQL_IN_VALUES.sub("IN (?)", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_length:
+        text = text[:max_length].rstrip() + " …[query shape shortened]"
+    return text

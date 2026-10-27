@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List
 from zoneinfo import ZoneInfo
 
-from correlator import correlate_all
+from correlator import correlate_all, normalize_query, query_operation
 from elastic_client import (
     ELASTIC_PASS,
     ELASTIC_URL,
@@ -112,6 +112,9 @@ def _parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.max_records < 0:
         parser.error("--max-records cannot be negative; use 0 for unlimited.")
+    args.mysql_query_format = os.getenv("MYSQL_QUERY_FORMAT", "short").strip().lower()
+    if args.mysql_query_format not in {"full", "short", "super_short"}:
+        parser.error("MYSQL_QUERY_FORMAT must be 'full', 'short', or 'super_short'.")
     if not ELASTIC_URL:
         parser.error("Set ELASTIC_URL in .env before running the exporter.")
     if args.mode in ("mysql", "merge") and not MYSQL_DATA_VIEW_ID:
@@ -139,11 +142,16 @@ def _stream_records(
     max_records: int,
     exclude_codes: List[str] | None = None,
 ) -> Iterator[Dict[str, Any]]:
+    source_fields = fields
+    if fields is MYSQL_FIELDS:
+        # Some data views provide a pre-normalized SQL shape. Fetch it when
+        # available, while keeping the public MySQL export columns unchanged.
+        source_fields = [*MYSQL_FIELDS, "query_normalized"]
     for page in client.stream_records(
         data_view_id=data_view_id,
         start_time=start_time,
         end_time=end_time,
-        fields=fields,
+        fields=source_fields,
         exclude_codes=exclude_codes,
         query_filter=os.getenv(
             "MYSQL_FILTER" if fields is MYSQL_FIELDS else "NGINX_FILTER", ""
@@ -153,20 +161,43 @@ def _stream_records(
         yield from page
 
 
+def _mysql_query_records(
+    records: Iterator[Dict[str, Any]], query_format: str
+) -> Iterator[Dict[str, Any]]:
+    """Choose the full SQL or a compact, value-normalized SQL shape."""
+    for record in records:
+        prepared = dict(record)
+        raw_query = prepared.get("query", "")
+        normalized_query = prepared.get("query_normalized", "")
+        source_query = normalized_query or raw_query
+        if query_format == "short":
+            prepared["query"] = normalize_query(source_query)
+        elif query_format == "super_short":
+            prepared["query"] = query_operation(source_query)
+        else:
+            prepared["query"] = raw_query or normalized_query
+        yield prepared
+
+
 def main() -> None:
     args = _parse_args()
     if args.start_time == "auto":
         args.start_time = _input_start_time()
+    if args.mode in ("mysql", "merge"):
+        print(f"Format query MySQL: {args.mysql_query_format}")
     client = _elastic_client(args)
 
     if args.mode == "mysql":
-        records = _stream_records(
-            client,
-            data_view_id=MYSQL_DATA_VIEW_ID,
-            start_time=args.start_time,
-            end_time=args.end_time,
-            fields=MYSQL_FIELDS,
-            max_records=args.max_records,
+        records = _mysql_query_records(
+            _stream_records(
+                client,
+                data_view_id=MYSQL_DATA_VIEW_ID,
+                start_time=args.start_time,
+                end_time=args.end_time,
+                fields=MYSQL_FIELDS,
+                max_records=args.max_records,
+            ),
+            args.mysql_query_format,
         )
         total = export_to_excel(
             records, args.output, fields=MYSQL_FIELDS, sheet_title="MySQL Slow Queries"
@@ -185,13 +216,16 @@ def main() -> None:
             records, args.output, fields=NGINX_FIELDS, sheet_title="Nginx Access Logs"
         )
     else:
-        mysql_records = _stream_records(
-            client,
-            data_view_id=MYSQL_DATA_VIEW_ID,
-            start_time=args.start_time,
-            end_time=args.end_time,
-            fields=MYSQL_FIELDS,
-            max_records=args.max_records,
+        mysql_records = _mysql_query_records(
+            _stream_records(
+                client,
+                data_view_id=MYSQL_DATA_VIEW_ID,
+                start_time=args.start_time,
+                end_time=args.end_time,
+                fields=MYSQL_FIELDS,
+                max_records=args.max_records,
+            ),
+            args.mysql_query_format,
         )
         nginx_records = _stream_records(
             client,
