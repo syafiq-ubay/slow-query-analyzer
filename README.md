@@ -46,6 +46,12 @@ docker compose run --rm elastic-export merge \
   --output output/merge_logs.xlsx
 ```
 
+## Visualisasi hasil merge
+
+Dashboard HTML tersedia di `src/index.html`. Buka file tersebut di browser, pilih `output/merge_logs.xlsx`, dan dashboard akan menampilkan jumlah baris, rata-rata waktu query dan response, error HTTP, grafik per user/schema/status dengan tooltip dan unduhan PNG, serta tabel pencarian. Tabel menyediakan mode semua log dan mode unique yang menggabungkan path yang sama per user, dilengkapi jumlah dan rentang tanggal data yang difilter. Saat grafik user diklik, tooltip path akan tetap terbuka dan menyediakan Excel ringkas path untuk user tersebut. Tabel mencakup referer dan dapat diekspor ke Excel mengikuti filter dan mode tabel yang sedang aktif.
+
+Data Excel dibaca dan diproses langsung di browser; tidak ada backend atau database dan file tidak diunggah. Saat ini halaman memuat library pembaca Excel dari jsDelivr, sehingga perlu koneksi internet ketika dashboard dibuka.
+
 Status Nginx yang dikecualikan secara default diatur lewat `NGINX_EXCLUDE_CODES` di `.env`. Isi dengan daftar dipisahkan koma, misalnya `401,403,499`; jika kosong, tidak ada status yang otomatis dikecualikan. Opsi `--exclude-code` tetap bisa dipakai untuk menambahkan pengecualian saat menjalankan perintah. Pengaturan ini berlaku pada mode `nginx` dan `merge`. Hasil merge memiliki satu baris untuk setiap pasangan timestamp yang sama. Record MySQL tanpa pasangan tetap ditampilkan dengan kolom Nginx kosong. `--max-records` berlaku terpisah untuk masing-masing data view.
 
 ## Kredensial dan konfigurasi

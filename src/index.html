@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f5f7fb">
+    <title>Slow Query Analyzer · Dashboard</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div class="loading-overlay" id="loading-overlay" hidden role="status" aria-live="polite">
+      <div class="loading-card"><span class="spinner" aria-hidden="true"></span><strong id="loading-title">Memproses file Excel</strong><span id="loading-detail">Mohon tunggu, data sedang dibaca di browser.</span></div>
+    </div>
+    <main class="shell">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="Slow Query Analyzer">
+          <span class="brand-mark">SQ</span>
+          <span><strong>Slow Query</strong><small>LOG ANALYZER</small></span>
+        </a>
+        <span class="local-badge"><span></span> Diproses lokal di browser</span>
+      </header>
+
+      <section class="intro">
+        <div>
+          <p class="eyebrow">ANALISIS LOG</p>
+          <h1>Ringkasan performa</h1>
+          <p class="subtitle">Lihat hubungan slow query MySQL dan request Nginx dari hasil merge Excel.</p>
+        </div>
+        <label class="upload-button" for="excel-file"><span class="upload-icon">↑</span> Pilih file Excel</label>
+        <input id="excel-file" type="file" accept=".xlsx,.xls" hidden>
+      </section>
+
+      <section class="file-strip" id="file-strip" hidden>
+        <span class="file-icon">XLS</span>
+        <span class="file-info"><strong id="file-name">—</strong><small id="file-detail">—</small></span>
+        <button class="text-button" id="clear-file" type="button">Ganti file</button>
+      </section>
+
+      <section class="empty-state" id="empty-state">
+        <div class="empty-art"><span>↥</span><i></i><i></i><i></i></div>
+        <h2>Mulai dengan file merge logs</h2>
+        <p>Pilih <code>merge_logs.xlsx</code> untuk membuat ringkasan dan grafik. File tidak diunggah ke server.</p>
+        <label class="upload-button secondary" for="excel-file">Pilih file Excel</label>
+        <small class="supported">Mendukung .xlsx dan .xls</small>
+      </section>
+
+      <div id="dashboard" hidden>
+        <section class="metric-grid" aria-label="Ringkasan">
+          <article class="metric-card"><div class="metric-heading">Total pasangan log <span class="metric-symbol purple">↔</span></div><strong id="metric-total">0</strong><small>baris pada file merge</small></article>
+          <article class="metric-card"><div class="metric-heading">Rata-rata query time <span class="metric-symbol blue">◷</span></div><strong id="metric-query-time">—</strong><small>detik · MySQL</small></article>
+          <article class="metric-card"><div class="metric-heading">Rata-rata response time <span class="metric-symbol orange">⌁</span></div><strong id="metric-response-time">—</strong><small>detik · Nginx</small></article>
+          <article class="metric-card"><div class="metric-heading">HTTP error (4xx/5xx) <span class="metric-symbol red">!</span></div><strong id="metric-errors">0</strong><small id="metric-error-rate">0% dari request</small></article>
+        </section>
+
+        <section class="panel chart-panel user-chart-panel">
+          <div class="panel-heading"><div><h2>Path terkait slow query per user</h2><p>Total request per user MySQL · arahkan untuk detail, klik agar tooltip tetap terbuka</p></div><div class="chart-actions"><span class="chart-tag">MYSQL + NGINX</span><button class="download-button" type="button" data-download-chart="user-chart">Unduh PNG</button></div></div>
+          <div class="chart-area user-chart-area"><canvas id="user-chart" aria-label="Grafik horizontal jumlah path per user"></canvas><p class="chart-empty" id="user-empty" hidden>Tidak ada path Nginx yang berpasangan dengan user MySQL.</p></div>
+        </section>
+
+        <section class="chart-grid">
+          <article class="panel chart-panel">
+            <div class="panel-heading"><div><h2>Query time per schema</h2><p>Rata-rata durasi query dalam detik</p></div><div class="chart-actions"><span class="chart-tag">MYSQL</span><button class="download-button" type="button" data-download-chart="schema-chart">PNG</button></div></div>
+            <div class="chart-area"><canvas id="schema-chart" aria-label="Grafik rata-rata query time per schema"></canvas><p class="chart-empty" id="schema-empty" hidden>Tidak ada data schema atau query time.</p></div>
+          </article>
+          <article class="panel chart-panel">
+            <div class="panel-heading"><div><h2>Distribusi status HTTP</h2><p>Jumlah request berdasarkan kode status</p></div><div class="chart-actions"><span class="chart-tag nginx">NGINX</span><button class="download-button" type="button" data-download-chart="status-chart">PNG</button></div></div>
+            <div class="chart-area"><canvas id="status-chart" aria-label="Grafik jumlah status HTTP"></canvas><p class="chart-empty" id="status-empty" hidden>Tidak ada data status HTTP.</p></div>
+          </article>
+        </section>
+
+        <section class="panel table-panel">
+          <div class="table-heading"><div><h2>Detail merged logs</h2><p id="table-count">0 baris</p></div><div class="table-controls"><label class="filter-control">User<select id="user-filter" aria-label="Filter berdasarkan user"><option value="">Semua user</option></select></label><label class="filter-control">Mode tabel<select id="unique-mode" aria-label="Pilih mode tabel"><option value="all">Semua log</option><option value="unique">Unique</option></select></label><label class="search-box"><span>⌕</span><input id="search" type="search" placeholder="Cari query, schema, path..." aria-label="Cari log"></label><button class="download-button export-button" id="export-excel" type="button">Unduh Excel</button></div></div>
+          <div class="table-scroll"><table><thead><tr><th>WAKTU</th><th>USER</th><th>SCHEMA</th><th>JUMLAH</th><th>QUERY TIME</th><th>HTTP</th><th>RESPONSE TIME</th><th>PATH</th><th>REFERER</th><th>QUERY</th></tr></thead><tbody id="log-rows"></tbody></table></div>
+          <div class="table-footer"><div class="table-footer-info"><span id="page-info">—</span></div><div class="table-footer-actions"><label class="page-size-control">Tampilkan<select id="page-size" aria-label="Jumlah baris per halaman"><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="100">100</option></select>baris</label><div class="pagination"><button id="previous-page" type="button" aria-label="Halaman sebelumnya">←</button><button id="next-page" type="button" aria-label="Halaman berikutnya">→</button></div></div></div>
+        </section>
+      </div>
+      <p class="notice" id="notice" role="status" hidden></p>
+      <footer>Slow Query Analyzer <span>·</span> Data tetap berada di perangkat Anda</footer>
+    </main>
+  </body>
+</html>
