@@ -70,6 +70,17 @@
           </article>
         </section>
 
+        <section class="analysis-chart-grid">
+          <article class="panel chart-panel">
+            <div class="panel-heading"><div><h2>Trend line query time per jam</h2><p>Rata-rata, jumlah, nilai tertinggi, dan schema teratas · waktu Jakarta</p></div><button class="download-button" type="button" data-download-chart="trend-chart">PNG</button></div>
+            <div class="chart-area analysis-chart-area"><canvas id="trend-chart" aria-label="Grafik tren rata-rata query time per jam"></canvas><p class="chart-empty" id="trend-empty" hidden>Tidak ada timestamp dan query time yang dapat dianalisis.</p></div>
+          </article>
+          <article class="panel chart-panel">
+            <div class="panel-heading"><div><h2>Query time vs response time</h2><p>Tiap titik satu merged log · maksimum 1.800 titik</p></div><button class="download-button" type="button" data-download-chart="scatter-chart">PNG</button></div>
+            <div class="chart-area analysis-chart-area"><canvas id="scatter-chart" aria-label="Diagram hubungan query time dan response time"></canvas><p class="chart-empty" id="scatter-empty" hidden>Tidak ada pasangan waktu query dan response yang valid.</p></div>
+          </article>
+        </section>
+
         <section class="panel table-panel">
           <div class="table-heading"><div><h2>Detail merged logs</h2><p id="table-count">0 baris</p></div><div class="table-controls"><label class="filter-control">User<select id="user-filter" aria-label="Filter berdasarkan user"><option value="">Semua user</option></select></label><label class="filter-control">Mode tabel<select id="unique-mode" aria-label="Pilih mode tabel"><option value="all">Semua log</option><option value="unique">Unique</option></select></label><label class="search-box"><span>⌕</span><input id="search" type="search" placeholder="Cari query, schema, path..." aria-label="Cari log"></label><button class="download-button export-button" id="export-excel" type="button">Unduh Excel</button></div></div>
           <div class="table-scroll"><table><thead><tr><th>WAKTU</th><th>USER</th><th>SCHEMA</th><th>JUMLAH</th><th>QUERY TIME</th><th>HTTP</th><th>RESPONSE TIME</th><th>PATH</th><th>REFERER</th><th>QUERY</th></tr></thead><tbody id="log-rows"></tbody></table></div>

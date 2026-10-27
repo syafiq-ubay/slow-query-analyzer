@@ -95,6 +95,93 @@
     drawUserChart(userData());
     drawChart('schema-chart', 'schema-empty', schemaData(), '#6b5ce7', true, 'detik');
     drawChart('status-chart', 'status-empty', statusData(), '#4b9ce8', false, 'request');
+    drawTrendChart(trendData());
+    drawScatterChart(scatterData());
+  }
+  function trendData() {
+    const offset=7*60*60*1000, buckets=new Map();
+    state.rows.forEach((row)=>{
+      const time=parseLogDate(row[fields.time]),queryTime=number(row[fields.queryTime]);
+      if(!time||queryTime==null) return;
+      const hour=Math.floor((time.getTime()+offset)/3600000)*3600000-offset;
+      if(!buckets.has(hour)) buckets.set(hour,[]);
+      buckets.get(hour).push({queryTime,schema:String(row[fields.schema]||'(schema kosong)'),user:String(row[fields.user]||'(user kosong)'),path:String(row[fields.path]||'')});
+    });
+    const label=(time)=>new Intl.DateTimeFormat('id-ID',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Asia/Jakarta'}).format(new Date(time));
+    return [...buckets.entries()].sort((a,b)=>a[0]-b[0]).map(([time,records])=>{
+      const values=records.map((record)=>record.queryTime),schemaCounts=new Map();
+      records.forEach((record)=>schemaCounts.set(record.schema,(schemaCounts.get(record.schema)||0)+1));
+      const peak=records.reduce((best,record)=>record.queryTime>best.queryTime?record:best,records[0]);
+      const topSchema=[...schemaCounts.entries()].sort((a,b)=>b[1]-a[1])[0];
+      const min=values.reduce((best,value)=>Math.min(best,value),Infinity),max=values.reduce((best,value)=>Math.max(best,value),-Infinity);
+      return {time,label:label(time),value:average(values),count:values.length,min,max,peak,topSchema};
+    });
+  }
+  function drawTrendChart(points) {
+    const canvas=$('trend-chart'),empty=$('trend-empty'),rect=canvas.getBoundingClientRect();
+    if(!points.length||rect.width<2){canvas.hidden=true;empty.hidden=false;return;}
+    canvas.hidden=false;empty.hidden=true;
+    const ratio=window.devicePixelRatio||1;canvas.width=Math.round(rect.width*ratio);canvas.height=Math.round(rect.height*ratio);
+    const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);
+    const width=rect.width,height=rect.height,margin={left:48,right:14,top:15,bottom:34};
+    const plotW=width-margin.left-margin.right,plotH=height-margin.top-margin.bottom;
+    const max=Math.max(...points.map(point=>point.value),0.0001),hits=[];
+    ctx.fillStyle='#fff';ctx.fillRect(0,0,width,height);ctx.font='9px DM Sans, sans-serif';ctx.textBaseline='middle';
+    for(let i=0;i<=4;i++){
+      const y=margin.top+plotH*i/4,value=max*(1-i/4);
+      ctx.strokeStyle='#edf0f6';ctx.beginPath();ctx.moveTo(margin.left,y);ctx.lineTo(width-margin.right,y);ctx.stroke();
+      ctx.fillStyle='#98a3b5';ctx.textAlign='right';ctx.fillText(compact(value),margin.left-7,y);
+    }
+    const slot=points.length>1?plotW/(points.length-1):0;
+    const coordinates=points.map((point,index)=>({x:points.length>1?margin.left+slot*index:margin.left+plotW/2,y:margin.top+plotH-(point.value/max)*plotH,point}));
+    if(coordinates.length>1){ctx.beginPath();coordinates.forEach((item,index)=>index?ctx.lineTo(item.x,item.y):ctx.moveTo(item.x,item.y));ctx.strokeStyle='#6658df';ctx.lineWidth=2;ctx.stroke();}
+    coordinates.forEach((item)=>{
+      ctx.beginPath();ctx.arc(item.x,item.y,3.5,0,Math.PI*2);ctx.fillStyle='#6658df';ctx.fill();ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();
+      hits.push({x:item.x-9,y:item.y-9,w:18,h:18,point:item.point});
+    });
+    const labelCount=Math.min(points.length,7);
+    for(let i=0;i<labelCount;i++){
+      const index=labelCount===1?0:Math.round(i*(points.length-1)/(labelCount-1)),item=coordinates[index];
+      ctx.fillStyle='#8290a5';ctx.textAlign=index===0?'left':index===points.length-1?'right':'center';
+      ctx.fillText(item.point.label,item.x,height-13);
+    }
+    bindTooltip(canvas,getTooltip(canvas),hits,(point)=>`<strong>${escapeHtml(point.label)} WIB</strong><span>Rata-rata query: ${point.value.toFixed(4)} detik</span><span>${point.count.toLocaleString('id-ID')} slow query</span><span>Tercepat: ${point.min.toFixed(4)} detik</span><span>Terlama: ${point.max.toFixed(4)} detik · ${escapeHtml(point.peak.user)}</span><span>Schema teratas: ${escapeHtml(point.topSchema[0])} · ${point.topSchema[1].toLocaleString('id-ID')} query</span>${point.peak.path?`<span>Path query terlama: ${escapeHtml(point.peak.path)}</span>`:''}`);
+  }
+  function scatterData() {
+    const points=[];
+    state.rows.forEach((row)=>{
+      const query=number(row[fields.queryTime]),response=number(row[fields.responseTime]);
+      if(query==null||response==null) return;
+      points.push({query,response,user:String(row[fields.user]||'(user kosong)'),path:String(row[fields.path]||''),time:String(row[fields.time]||'')});
+    });
+    const step=Math.max(1,Math.ceil(points.length/1800));
+    return {points:points.filter((_,index)=>index%step===0),total:points.length};
+  }
+  function drawScatterChart(dataset) {
+    const canvas=$('scatter-chart'),empty=$('scatter-empty'),rect=canvas.getBoundingClientRect(),points=dataset.points;
+    if(!points.length||rect.width<2){canvas.hidden=true;empty.hidden=false;return;}
+    canvas.hidden=false;empty.hidden=true;
+    const ratio=window.devicePixelRatio||1;canvas.width=Math.round(rect.width*ratio);canvas.height=Math.round(rect.height*ratio);
+    const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);
+    const width=rect.width,height=rect.height,margin={left:47,right:14,top:14,bottom:36};
+    const plotW=width-margin.left-margin.right,plotH=height-margin.top-margin.bottom;
+    const maxX=Math.max(...points.map(point=>point.query),0.0001),maxY=Math.max(...points.map(point=>point.response),0.0001),hits=[];
+    ctx.fillStyle='#fff';ctx.fillRect(0,0,width,height);ctx.font='9px DM Sans, sans-serif';ctx.textBaseline='middle';
+    for(let i=0;i<=4;i++){
+      const x=margin.left+plotW*i/4,y=margin.top+plotH*(1-i/4);
+      ctx.strokeStyle='#edf0f6';ctx.beginPath();ctx.moveTo(x,margin.top);ctx.lineTo(x,height-margin.bottom);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(margin.left,y);ctx.lineTo(width-margin.right,y);ctx.stroke();
+      ctx.fillStyle='#98a3b5';ctx.textAlign='center';ctx.fillText(compact(maxX*i/4),x,height-24);
+      ctx.textAlign='right';ctx.fillText(compact(maxY*i/4),margin.left-7,y);
+    }
+    points.forEach((point)=>{
+      const x=margin.left+point.query/maxX*plotW,y=margin.top+plotH-point.response/maxY*plotH;
+      ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fillStyle='#4b9ce899';ctx.fill();
+      hits.push({x:x-5,y:y-5,w:10,h:10,point});
+    });
+    ctx.fillStyle='#758197';ctx.textAlign='center';ctx.fillText('Query time (detik)',margin.left+plotW/2,height-5);
+    ctx.save();ctx.translate(10,margin.top+plotH/2);ctx.rotate(-Math.PI/2);ctx.fillText('Response time (detik)',0,0);ctx.restore();
+    bindTooltip(canvas,getTooltip(canvas),hits,(point)=>`<strong>${escapeHtml(point.user)}</strong><span>Query time: ${point.query.toFixed(4)} detik</span><span>Response time: ${point.response.toFixed(4)} detik</span><span>${escapeHtml(point.path||'Path kosong')}</span>`);
   }
   function userData() {
     const users = new Map();
@@ -228,7 +315,7 @@
     }:null;
     canvas.onmouseleave=()=>{if(!canvas.pinnedPoint)tooltip.hidden=true;canvas.style.cursor='default';};
   }
-  function compact(value) { return value >= 10 ? value.toFixed(0) : value >= 1 ? value.toFixed(1) : value.toFixed(2); }
+  function compact(value) { return value === 0 ? '0' : value >= 10 ? value.toFixed(0) : value >= 1 ? value.toFixed(1) : value >= 0.01 ? value.toFixed(2) : value.toFixed(4); }
   function roundedRect(ctx,x,y,w,h,r) { ctx.beginPath(); ctx.roundRect(x,y,w,h,[r,r,0,0]); }
 
   function filterRows(query) {

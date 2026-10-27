@@ -48,7 +48,7 @@ docker compose run --rm elastic-export merge \
 
 ## Visualisasi hasil merge
 
-Dashboard HTML tersedia di `src/index.html`. Buka file tersebut di browser, pilih `output/merge_logs.xlsx`, dan dashboard akan menampilkan jumlah baris, rata-rata waktu query dan response, error HTTP, grafik per user/schema/status dengan tooltip dan unduhan PNG, serta tabel pencarian. Tabel menyediakan mode semua log dan mode unique yang menggabungkan path yang sama per user, dilengkapi jumlah dan rentang tanggal data yang difilter. Saat grafik user diklik, tooltip path akan tetap terbuka dan menyediakan Excel ringkas path untuk user tersebut. Tabel mencakup referer dan dapat diekspor ke Excel mengikuti filter dan mode tabel yang sedang aktif.
+Dashboard HTML tersedia di `src/index.html`. Buka file tersebut di browser, pilih `output/merge_logs.xlsx`, dan dashboard akan menampilkan jumlah baris, rata-rata waktu query dan response, error HTTP, grafik per user/schema/status, tren query time per jam, hubungan query time dengan response time, tooltip, serta unduhan PNG. Tabel menyediakan mode semua log dan mode unique yang menggabungkan path yang sama per user, dilengkapi jumlah dan rentang tanggal data yang difilter. Saat grafik user diklik, tooltip path akan tetap terbuka dan menyediakan Excel ringkas path untuk user tersebut. Tabel mencakup referer dan dapat diekspor ke Excel mengikuti filter dan mode tabel yang sedang aktif.
 
 Data Excel dibaca dan diproses langsung di browser; tidak ada backend atau database dan file tidak diunggah. Saat ini halaman memuat library pembaca Excel dari jsDelivr, sehingga perlu koneksi internet ketika dashboard dibuka.
 
