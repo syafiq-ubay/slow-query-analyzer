@@ -1,6 +1,6 @@
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { rows: [], filtered: [], displayRows: [], page: 0, pageSize: 10, selectedUser: '', uniqueMode: false };
+  const state = { rows: [], filtered: [], displayRows: [], rawSheet: null, rawHeaders: [], page: 0, pageSize: 10, selectedUser: '', uniqueMode: false };
   const fields = {
     time: 'mysql_@timestamp', user: 'mysql_user', schema: 'mysql_schema', queryTime: 'mysql_query_time',
     status: 'http_status_code', responseTime: 'http_response_time', path: 'http_path', referer: 'http_referer', query: 'mysql_query'
@@ -45,6 +45,72 @@
   });
   window.addEventListener('resize', debounce(() => { if (state.rows.length) drawCharts(); }, 120));
 
+  // ─── Data Source Mode (auto / manual) ────────────────────────────────────────
+  (function initDataMode() {
+    const cfg = (window.APP_CONFIG) || {};
+    const mode = (cfg.DATA_MODE || 'manual').toLowerCase();
+    const filePath = (cfg.AUTO_FILE_PATH || 'output/merge_logs.xlsx').trim();
+
+    const badge = $('mode-badge');
+    const uploadLabel = $('upload-label');
+    const autoFetchBtn = $('auto-fetch-btn');
+
+    function setModeBadge(activeMode, isFallback) {
+      if (!badge) return;
+      badge.hidden = false;
+      badge.className = 'mode-badge ' + (activeMode === 'auto' ? 'mode-auto' : 'mode-manual');
+      if (activeMode === 'auto') {
+        badge.textContent = 'Mode Auto';
+      } else if (isFallback) {
+        badge.textContent = 'Mode Manual (fallback)';
+        badge.classList.add('mode-manual');
+      } else {
+        badge.textContent = 'Mode Manual';
+      }
+    }
+
+    async function fetchAutoFile() {
+      if ($('loading-title')) $('loading-title').textContent = `Memuat otomatis: ${filePath}`;
+      if ($('loading-overlay')) $('loading-overlay').hidden = false;
+      try {
+        const response = await fetch(filePath, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const arrayBuffer = await response.arrayBuffer();
+        const file = new File([arrayBuffer], filePath.split('/').pop() || 'merge_logs.xlsx', {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        });
+        await loadWorkbook(file);
+        setModeBadge('auto', false);
+        if (uploadLabel) uploadLabel.hidden = true;
+        if (autoFetchBtn) autoFetchBtn.hidden = false;
+      } catch (err) {
+        console.warn('[DataMode] Auto fetch gagal, fallback ke manual:', err.message);
+        setModeBadge('manual', true);
+        showNotice(
+          `Mode auto: file "${filePath}" tidak dapat diakses (${err.message}). ` +
+          'Beralih ke mode manual — silakan upload file Excel secara manual.'
+        );
+        if (uploadLabel) {
+          uploadLabel.hidden = false;
+          uploadLabel.classList.add('auto-fallback');
+        }
+        if (autoFetchBtn) autoFetchBtn.hidden = true;
+      } finally {
+        if ($('loading-overlay')) $('loading-overlay').hidden = true;
+      }
+    }
+
+    if (mode === 'auto') {
+      fetchAutoFile();
+      if (autoFetchBtn) autoFetchBtn.addEventListener('click', fetchAutoFile);
+    } else {
+      setModeBadge('manual', false);
+      if (uploadLabel) uploadLabel.hidden = false;
+      if (autoFetchBtn) autoFetchBtn.hidden = true;
+    }
+  })();
+
+
   async function loadWorkbook(file) {
     hideNotice();
     if (!window.XLSX) return showNotice('Library pembaca Excel belum termuat. Periksa koneksi internet lalu muat ulang halaman.');
@@ -62,6 +128,8 @@
       const missing = Object.values(fields).filter((field) => !headers.includes(field));
       if (missing.length) throw new Error(`Kolom merge tidak lengkap. Kolom yang tidak ditemukan: ${missing.join(', ')}`);
       state.rows = rows;
+      state.rawSheet = sheet;
+      state.rawHeaders = headers;
       $('file-name').textContent = file.name;
       $('file-detail').textContent = `${rows.length.toLocaleString('id-ID')} baris · ${workbook.SheetNames.length} sheet`;
       $('file-strip').hidden = false;
@@ -397,29 +465,297 @@
     const names={'user-chart':'path-per-user','schema-chart':'query-time-per-schema','status-chart':'status-http'};
     const link=document.createElement('a');link.href=canvas.toDataURL('image/png');link.download=`${names[canvasId]||'grafik'}.png`;link.click();
   }
-  function exportFilteredExcel() {
-    if(!window.XLSX) return showNotice('Library Excel belum termuat. Periksa koneksi internet lalu muat ulang halaman.');
-    if(!state.displayRows.length) return showNotice('Tidak ada baris hasil filter untuk diunduh.');
-    const columns=[
-      ['Waktu',fields.time,24],['User MySQL',fields.user,22],['Schema',fields.schema,20],['Jumlah','__count',12],['Query time (detik)',fields.queryTime,18],
-      ['HTTP status',fields.status,14],['Response time (detik)',fields.responseTime,22],['Path',fields.path,42],['Referer',fields.referer,48],['Query',fields.query,60]
-    ];
-    const values=state.displayRows.map((row)=>columns.map(([,field])=>{
-      if(field==='__count') return row.__count||1;
-      if(field===fields.queryTime||field===fields.responseTime||field===fields.status) return number(row[field]);
-      return row[field]??'';
-    }));
-    const worksheet=XLSX.utils.aoa_to_sheet([columns.map(([title])=>title),...values]);
-    worksheet['!cols']=columns.map(([, ,wch])=>({wch}));
-    worksheet['!rows']=[{hpt:24}];
-    worksheet['!autofilter']={ref:XLSX.utils.encode_range({s:{r:0,c:0},e:{r:state.displayRows.length,c:columns.length-1}})};
-    for(let row=1;row<=state.displayRows.length;row++){
-      for(const column of [4,6]){const cell=worksheet[XLSX.utils.encode_cell({r:row,c:column})];if(cell)cell.z='0.0000';}
-      for(const column of [3,5]){const cell=worksheet[XLSX.utils.encode_cell({r:row,c:column})];if(cell)cell.z='0';}
+  // ─── Query Classification ────────────────────────────────────────────────────
+  function classifyQuery(queryText) {
+    if (!queryText || String(queryText).trim() === '') return { k1: 'Tidak Diketahui', k2: '-' };
+    // Strip session preambles (e.g. SET timestamp=...;)
+    const stripped = String(queryText).replace(/^\s*(SET\s+\S+\s*=\s*[^;]+;\s*)+/i, '').trim();
+    const q = stripped;
+    const qUp = q.toUpperCase().replace(/\s+/g, ' ');
+
+    if (qUp.match(/^SELECT\b/)) {
+      const k1 = 'SELECT';
+      const isSelectAll = /^\s*SELECT\s+(\/\*.*?\*\/\s*)?\*\s+FROM\b/i.test(q) || /\bSELECT\s+\*\s+FROM\b/i.test(qUp);
+      const hasJoin = /\bJOIN\b/.test(qUp);
+      const hasWhere = /\bWHERE\b/.test(qUp);
+      const hasLike = /\bLIKE\b/.test(qUp);
+      const hasAgg = /\b(COUNT|SUM|AVG|MIN|MAX)\s*\(/.test(qUp) || /\bGROUP\s+BY\b/.test(qUp);
+      const hasSubquery = /\b(IN|EXISTS)\s*\(\s*SELECT\b/.test(qUp);
+      const hasLimit = /\bLIMIT\b/.test(qUp) || /\bORDER\s+BY\b/.test(qUp);
+
+      let k2 = 'Ambil Kolom Pilihan';
+      if (hasSubquery) {
+        k2 = 'Subquery Bersarang';
+      } else if (hasAgg) {
+        k2 = 'Agregasi & Rekapitulasi';
+      } else if (hasJoin) {
+        k2 = 'Relasi Multi-Tabel (JOIN)';
+      } else if (hasLike) {
+        k2 = isSelectAll ? 'Pencarian LIKE (Semua Kolom)' : 'Pencarian LIKE (Kolom Pilihan)';
+      } else if (hasWhere) {
+        k2 = isSelectAll ? 'Filter Kondisi (Semua Kolom)' : 'Filter Kondisi (Kolom Pilihan)';
+      } else if (isSelectAll) {
+        k2 = 'Scan Penuh (SELECT *)';
+      } else if (hasLimit) {
+        k2 = 'Paginasi & Urutan (LIMIT)';
+      }
+      return { k1, k2 };
     }
-    const workbook=XLSX.utils.book_new();XLSX.utils.book_append_sheet(workbook,worksheet,'Merged Logs');
-    const date=new Date().toISOString().slice(0,10);
-    XLSX.writeFile(workbook,`merged-logs-filtered-${date}.xlsx`);
+
+    if (qUp.match(/^INSERT\b/)) {
+      const k1 = 'INSERT';
+      if (/\bON\s+DUPLICATE\s+KEY\b/.test(qUp)) return { k1, k2: 'Insert / Upsert' };
+      if (/\bINSERT\s+INTO\b.*\bSELECT\b/is.test(q)) return { k1, k2: 'Batch Insert (SELECT)' };
+      return { k1, k2: 'Tambah Data Baru' };
+    }
+
+    if (qUp.match(/^UPDATE\b/)) {
+      const k1 = 'UPDATE';
+      if (/\bJOIN\b/.test(qUp)) return { k1, k2: 'Update Multi-Tabel (JOIN)' };
+      if (/\bWHERE\b/.test(qUp)) return { k1, k2: 'Update Berfilter (WHERE)' };
+      return { k1, k2: 'Update Masal (Tanpa Filter)' };
+    }
+
+    if (qUp.match(/^DELETE\b/)) {
+      const k1 = 'DELETE';
+      if (/\bWHERE\b/.test(qUp)) return { k1, k2: 'Hapus Berfilter (WHERE)' };
+      return { k1, k2: 'Hapus Masal (Tanpa Filter)' };
+    }
+
+    if (qUp.match(/^CALL\b/)) {
+      return { k1: 'CALL', k2: 'Stored Procedure (SP)' };
+    }
+
+    if (qUp.match(/^CREATE\b/)) return { k1: 'DDL', k2: 'Buat Objek (CREATE)' };
+    if (qUp.match(/^ALTER\b/)) return { k1: 'DDL', k2: 'Ubah Struktur (ALTER)' };
+    if (qUp.match(/^DROP\b/)) return { k1: 'DDL', k2: 'Hapus Struktur (DROP)' };
+    if (qUp.match(/^TRUNCATE\b/)) return { k1: 'DDL', k2: 'Kosongkan Tabel (TRUNCATE)' };
+    if (qUp.match(/^(SHOW|DESCRIBE|EXPLAIN)\b/)) return { k1: 'SHOW', k2: 'Inspeksi Database (SHOW)' };
+    if (qUp.match(/^(SET|COMMIT|ROLLBACK|BEGIN|START\s+TRANSACTION)\b/)) return { k1: 'SESSION', k2: 'Pengaturan Sesi / Transaksi' };
+
+    return { k1: 'Lainnya', k2: 'Perintah Lainnya' };
+  }
+
+  // ─── Analysis & Export ────────────────────────────────────────────────────────
+  function buildSummarySheet(rows) {
+    const queryTimes = rows.map((r) => number(r[fields.queryTime])).filter((v) => v != null);
+    const responseTimes = rows.map((r) => number(r[fields.responseTime])).filter((v) => v != null);
+    const statuses = rows.map((r) => number(r[fields.status])).filter((v) => v != null);
+    const avg = (arr) => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null;
+    const pct = (n, d) => d ? `${(n / d * 100).toFixed(1)}%` : '0%';
+    const f4 = (v) => v != null ? Number(v.toFixed(4)) : '-';
+
+    const total = rows.length;
+    const errors = statuses.filter((s) => s >= 400).length;
+    const clientErr = statuses.filter((s) => s >= 400 && s < 500).length;
+    const serverErr = statuses.filter((s) => s >= 500).length;
+    const avgQt = avg(queryTimes), maxQt = queryTimes.length ? Math.max(...queryTimes) : null, minQt = queryTimes.length ? Math.min(...queryTimes) : null;
+    const avgRt = avg(responseTimes), maxRt = responseTimes.length ? Math.max(...responseTimes) : null;
+    const normal = queryTimes.filter((t) => t < 1).length;
+    const slow = queryTimes.filter((t) => t >= 1 && t < 5).length;
+    const verySlow = queryTimes.filter((t) => t >= 5).length;
+
+    // Klasifikasi 1 distribution
+    const k1Map = new Map();
+    rows.forEach((r) => {
+      const { k1 } = classifyQuery(r[fields.query]);
+      k1Map.set(k1, (k1Map.get(k1) || 0) + 1);
+    });
+    const k1Ranked = [...k1Map.entries()].sort((a, b) => b[1] - a[1]);
+
+    // Klasifikasi 2 distribution (top occurrences)
+    const k2Map = new Map();
+    rows.forEach((r) => {
+      const { k2 } = classifyQuery(r[fields.query]);
+      k2Map.set(k2, (k2Map.get(k2) || 0) + 1);
+    });
+    const k2Ranked = [...k2Map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
+
+    // Top 10 user
+    const userMap = new Map();
+    rows.forEach((r) => {
+      const user = String(r[fields.user] || '(user kosong)');
+      const qt = number(r[fields.queryTime]);
+      if (!userMap.has(user)) userMap.set(user, { count: 0, total: 0, max: 0 });
+      const u = userMap.get(user); u.count++;
+      if (qt != null) { u.total += qt; u.max = Math.max(u.max, qt); }
+    });
+    const userRanked = [...userMap.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, 10);
+
+    // Top 10 schema
+    const schMap = new Map();
+    rows.forEach((r) => {
+      const sch = String(r[fields.schema] || '(kosong)');
+      const qt = number(r[fields.queryTime]);
+      if (!schMap.has(sch)) schMap.set(sch, { count: 0, total: 0, max: 0 });
+      const s = schMap.get(sch); s.count++;
+      if (qt != null) { s.total += qt; s.max = Math.max(s.max, qt); }
+    });
+    const schRanked = [...schMap.entries()].sort((a, b) => (b[1].total/(b[1].count||1)) - (a[1].total/(a[1].count||1))).slice(0, 10);
+
+    // Status dist
+    const stMap = new Map();
+    statuses.forEach((s) => { const k = String(Math.round(s)); stMap.set(k, (stMap.get(k) || 0) + 1); });
+    const stRanked = [...stMap.entries()].sort((a, b) => b[1] - a[1]);
+
+    // Top 5 slowest
+    const top5 = [...rows].filter((r) => number(r[fields.queryTime]) != null)
+      .sort((a, b) => (number(b[fields.queryTime])||0) - (number(a[fields.queryTime])||0)).slice(0, 5)
+      .map((r) => {
+        const { k1, k2 } = classifyQuery(r[fields.query]);
+        return [String(r[fields.time]||'-'), String(r[fields.user]||'-'), String(r[fields.schema]||'-'),
+          f4(number(r[fields.queryTime])), k1, k2, String(r[fields.path]||'-')];
+      });
+
+    const nl = [[]], H = (t) => [t];
+    const ts = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+
+    const data = [
+      ['SUMMARY REPORT — SLOW QUERY LOG ANALYZER'],
+      [`Dibuat: ${ts}   |   Total data: ${total.toLocaleString('id-ID')} baris`],
+      nl[0],
+      // ── 1. KPI ──
+      ['━━━ RINGKASAN KINERJA ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['Metrik', 'Nilai', 'Satuan'],
+      ['Total Log Dianalisa', total, 'baris'],
+      ['Query Time — Rata-rata', f4(avgQt), 'detik'],
+      ['Query Time — Tercepat', f4(minQt), 'detik'],
+      ['Query Time — Terlama', f4(maxQt), 'detik'],
+      ['Response Time — Rata-rata', f4(avgRt), 'detik'],
+      ['Response Time — Tertinggi', f4(maxRt), 'detik'],
+      ['Total HTTP Error (4xx+5xx)', errors, `${pct(errors, statuses.length)} dari seluruh request`],
+      nl[0],
+      // ── 2. Kecepatan Query ──
+      ['━━━ DISTRIBUSI KECEPATAN QUERY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['Kategori', 'Jumlah', 'Persentase', 'Threshold'],
+      ['Normal', normal, pct(normal, total), '< 1 detik'],
+      ['Lambat', slow, pct(slow, total), '1 – 5 detik'],
+      ['Sangat Lambat', verySlow, pct(verySlow, total), '>= 5 detik'],
+      nl[0],
+      // ── 3. Klasifikasi 1 ──
+      ['━━━ DISTRIBUSI TIPE QUERY (KLASIFIKASI 1) ━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['Tipe Query', 'Jumlah', 'Persentase'],
+      ...k1Ranked.map(([k, n]) => [k, n, pct(n, total)]),
+      nl[0],
+      // ── 4. Klasifikasi 2 (top 15) ──
+      ['━━━ TOP 15 TUJUAN QUERY (KLASIFIKASI 2) ━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['Deskripsi Tujuan Query', 'Jumlah', 'Persentase'],
+      ...k2Ranked.map(([k, n]) => [k, n, pct(n, total)]),
+      nl[0],
+      // ── 5. Keterangan Klasifikasi ──
+      ['━━━ KETERANGAN STANDAR KLASIFIKASI QUERY ━━━━━━━━━━━━━'],
+      ['Klasifikasi 1', 'Klasifikasi 2 (Standar Ringkas)', 'Kriteria & Keterangan Pola Query'],
+      ['SELECT', 'Pencarian LIKE (Semua Kolom)', 'Query SELECT * dengan klausa LIKE (wildcard scan pada seluruh kolom)'],
+      ['SELECT', 'Pencarian LIKE (Kolom Pilihan)', 'Query SELECT kolom spesifik dengan klausa LIKE'],
+      ['SELECT', 'Filter Kondisi (Semua Kolom)', 'Query SELECT * dengan filter klausa WHERE non-LIKE'],
+      ['SELECT', 'Filter Kondisi (Kolom Pilihan)', 'Query SELECT kolom spesifik dengan filter klausa WHERE'],
+      ['SELECT', 'Scan Penuh (SELECT *)', 'Query SELECT * tanpa klausa WHERE (membaca seluruh baris tabel)'],
+      ['SELECT', 'Relasi Multi-Tabel (JOIN)', 'Query yang menggabungkan 2 tabel atau lebih (klausa JOIN)'],
+      ['SELECT', 'Agregasi & Rekapitulasi', 'Query pengelompokan atau fungsi agregat (GROUP BY, COUNT, SUM, AVG, dsb)'],
+      ['SELECT', 'Subquery Bersarang', 'Query bersarang / subquery (klausa IN / EXISTS (SELECT ...))'],
+      ['SELECT', 'Paginasi & Urutan (LIMIT)', 'Query pembatasan jumlah atau pengurutan baris (LIMIT / ORDER BY)'],
+      ['SELECT', 'Ambil Kolom Pilihan', 'Query SELECT kolom spesifik sederhana tanpa filter kondisi'],
+      ['INSERT', 'Tambah Data Baru', 'Penyisipan baris data baru ke tabel (INSERT standar)'],
+      ['INSERT', 'Insert / Upsert', 'Penyisipan atau pembaruan otomatis (ON DUPLICATE KEY UPDATE)'],
+      ['INSERT', 'Batch Insert (SELECT)', 'Penyisipan data masal hasil dari query SELECT (INSERT INTO SELECT)'],
+      ['UPDATE', 'Update Berfilter (WHERE)', 'Pembaruan data tabel dengan kriteria filter klausa WHERE'],
+      ['UPDATE', 'Update Multi-Tabel (JOIN)', 'Pembaruan data yang melibatkan relasi dengan tabel lain (JOIN)'],
+      ['UPDATE', 'Update Masal (Tanpa Filter)', 'Pembaruan seluruh baris tanpa filter WHERE (berisiko membebani database)'],
+      ['DELETE', 'Hapus Berfilter (WHERE)', 'Penghapusan baris data dengan kriteria filter klausa WHERE'],
+      ['DELETE', 'Hapus Masal (Tanpa Filter)', 'Penghapusan seluruh data tanpa klausa WHERE (berisiko menghapus semua baris)'],
+      ['CALL', 'Stored Procedure (SP)', 'Pemanggilan prosedur tersimpan pada database (CALL sp_name)'],
+      ['DDL', 'Buat Objek (CREATE)', 'Pembuatan tabel, view, atau indeks baru'],
+      ['DDL', 'Ubah Struktur (ALTER)', 'Perubahan struktur tabel, penambahan/penghapusan kolom atau indeks'],
+      ['DDL', 'Hapus Struktur (DROP)', 'Penghapusan objek database atau tabel permanen'],
+      ['DDL', 'Kosongkan Tabel (TRUNCATE)', 'Pengosongan seluruh data tabel secara cepat tanpa log baris'],
+      ['SHOW', 'Inspeksi Database (SHOW)', 'Pemeriksaan status, proses, atau struktur skema database (SHOW/EXPLAIN)'],
+      ['SESSION', 'Pengaturan Sesi / Transaksi', 'Perintah sesi atau kontrol transaksi (SET, COMMIT, ROLLBACK, BEGIN)'],
+      ['Lainnya', 'Perintah Lainnya', 'Perintah SQL lainnya di luar kategori umum di atas'],
+      nl[0],
+      // ── 6. Top User ──
+      ['━━━ TOP 10 USER — TOTAL QUERY TIME ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['User MySQL', 'Jumlah Log', 'Total Qt (det)', 'Rata-rata Qt (det)', 'Maks Qt (det)'],
+      ...userRanked.map(([u, d]) => [u, d.count, f4(d.total), f4(d.count?d.total/d.count:0), f4(d.max)]),
+      nl[0],
+      // ── 7. Top Schema ──
+      ['━━━ TOP 10 SCHEMA — RATA-RATA QUERY TIME ━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['Schema', 'Jumlah Log', 'Total Qt (det)', 'Rata-rata Qt (det)', 'Maks Qt (det)'],
+      ...schRanked.map(([s, d]) => [s, d.count, f4(d.total), f4(d.count?d.total/d.count:0), f4(d.max)]),
+      nl[0],
+      // ── 8. HTTP Status ──
+      ['━━━ DISTRIBUSI HTTP STATUS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['HTTP Status', 'Jumlah', 'Persentase', 'Kategori'],
+      ...stRanked.map(([s, n]) => {
+        const c = Number(s);
+        const cat = c>=500?'Server Error (5xx)':c>=400?'Client Error (4xx)':c>=300?'Redirect (3xx)':'Sukses (2xx)';
+        return [s, n, pct(n, statuses.length), cat];
+      }),
+      ['— Client Error (4xx)', clientErr, pct(clientErr, statuses.length), ''],
+      ['— Server Error (5xx)', serverErr, pct(serverErr, statuses.length), ''],
+      nl[0],
+      // ── 9. Top 5 Lambat ──
+      ['━━━ 5 QUERY PALING LAMBAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['Waktu', 'User MySQL', 'Schema', 'Qt (det)', 'Klasif. 1', 'Klasif. 2 (Tujuan)', 'Path'],
+      ...top5,
+      nl[0],
+      // ── 10. Rekomendasi ──
+      ['━━━ REKOMENDASI OTOMATIS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ...(verySlow > 0 ? [[`[!] ${verySlow} query >= 5 detik — evaluasi indeks & struktur query`]] : []),
+      ...(errors > 0 ? [[`[!] ${errors} HTTP error — periksa log aplikasi & server`]] : []),
+      ...(k1Ranked[0] ? [[`[i] Tipe query dominan: ${k1Ranked[0][0]} (${k1Ranked[0][1]} kali — ${pct(k1Ranked[0][1], total)})`]] : []),
+      ...(k2Ranked[0] ? [[`[i] Tujuan query terbanyak: ${k2Ranked[0][0]} (${k2Ranked[0][1]} kali)`]] : []),
+      ...(userRanked[0] ? [[`[i] User paling banyak membebani DB: ${userRanked[0][0]} (total ${userRanked[0][1].total.toFixed(2)} det)`]] : []),
+      [`[i] Lihat sheet "Data Asli (Original)" untuk file dan data mentah lengkap sebelum diolah`],
+    ];
+
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    ws['!cols'] = [{wch:32},{wch:34},{wch:75},{wch:24},{wch:22},{wch:32},{wch:42}];
+    return ws;
+  }
+
+  function buildOriginalSheet() {
+    if (state.rawSheet) {
+      try {
+        return JSON.parse(JSON.stringify(state.rawSheet));
+      } catch (_) {}
+    }
+    if (state.rows && state.rows.length) {
+      return XLSX.utils.json_to_sheet(state.rows, { header: state.rawHeaders.length ? state.rawHeaders : undefined });
+    }
+    return XLSX.utils.aoa_to_sheet([['Data Asli Kosong']]);
+  }
+
+  function exportFilteredExcel() {
+    if (!window.XLSX) return showNotice('Library Excel belum termuat. Periksa koneksi internet lalu muat ulang halaman.');
+    if (!state.displayRows.length) return showNotice('Tidak ada baris hasil filter untuk diunduh.');
+    const columns = [
+      ['Waktu', fields.time, 24], ['User MySQL', fields.user, 22], ['Schema', fields.schema, 20],
+      ['Jumlah', '__count', 12], ['Query Time (detik)', fields.queryTime, 18],
+      ['HTTP Status', fields.status, 14], ['Response Time (detik)', fields.responseTime, 22],
+      ['Path', fields.path, 42], ['Referer', fields.referer, 48],
+      ['Klasifikasi 1', '__k1', 16], ['Klasifikasi 2 (Tujuan Query)', '__k2', 32]
+    ];
+    const values = state.displayRows.map((row) => columns.map(([, field]) => {
+      if (field === '__count') return row.__count || 1;
+      if (field === '__k1') return classifyQuery(row[fields.query]).k1;
+      if (field === '__k2') return classifyQuery(row[fields.query]).k2;
+      if (field === fields.queryTime || field === fields.responseTime || field === fields.status) return number(row[field]);
+      return row[field] ?? '';
+    }));
+    const ws1 = XLSX.utils.aoa_to_sheet([columns.map(([title]) => title), ...values]);
+    ws1['!cols'] = columns.map(([,, wch]) => ({ wch }));
+    ws1['!rows'] = [{hpt:24}];
+    ws1['!autofilter'] = {ref: XLSX.utils.encode_range({s:{r:0,c:0},e:{r:state.displayRows.length,c:columns.length-1}})};
+    for (let row = 1; row <= state.displayRows.length; row++) {
+      for (const col of [4,6]) { const cell = ws1[XLSX.utils.encode_cell({r:row,c:col})]; if(cell) cell.z='0.0000'; }
+      for (const col of [3,5]) { const cell = ws1[XLSX.utils.encode_cell({r:row,c:col})]; if(cell) cell.z='0'; }
+    }
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, ws1, 'Merged Logs');
+    XLSX.utils.book_append_sheet(workbook, buildSummarySheet(state.displayRows), 'Summary Report');
+    XLSX.utils.book_append_sheet(workbook, buildOriginalSheet(), 'Data Asli (Original)');
+    const date = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(workbook, `merged-logs-filtered-${date}.xlsx`);
     hideNotice();
   }
   function exportPathExcel(user) {
