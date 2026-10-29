@@ -14,7 +14,7 @@
   const display = (value) => value == null || value === '' ? '—' : String(value);
   const average = (values) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
   const formatSeconds = (value) => value == null ? '—' : `${value < 0.01 && value > 0 ? value.toFixed(4) : value.toFixed(2)}s`;
-  const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+  const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 
   $('excel-file').addEventListener('change', (event) => {
     const file = event.target.files?.[0];
@@ -44,6 +44,74 @@
     }
   });
   window.addEventListener('resize', debounce(() => { if (state.rows.length) drawCharts(); }, 120));
+
+  // ─── Data Source Mode (auto / manual) ────────────────────────────────────────
+  (function initDataMode() {
+    const cfg = (window.APP_CONFIG) || {};
+    const mode = (cfg.DATA_MODE || 'manual').toLowerCase();
+    const filePath = (cfg.AUTO_FILE_PATH || 'output/merge_logs.xlsx').trim();
+
+    const badge = $('mode-badge');
+    const uploadLabel = $('upload-label');
+    const autoFetchBtn = $('auto-fetch-btn');
+
+    function setModeBadge(activeMode, isFallback) {
+      badge.hidden = false;
+      badge.className = 'mode-badge ' + (activeMode === 'auto' ? 'mode-auto' : 'mode-manual');
+      if (activeMode === 'auto') {
+        badge.textContent = 'Mode Auto';
+      } else if (isFallback) {
+        badge.textContent = 'Mode Manual (fallback)';
+        badge.classList.add('mode-manual');
+      } else {
+        badge.textContent = 'Mode Manual';
+      }
+    }
+
+    async function fetchAutoFile() {
+      $('loading-title').textContent = `Memuat otomatis: ${filePath}`;
+      $('loading-overlay').hidden = false;
+      try {
+        const response = await fetch(filePath, { cache: 'no-store' });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const arrayBuffer = await response.arrayBuffer();
+        const file = new File([arrayBuffer], filePath.split('/').pop() || 'merge_logs.xlsx', {
+          type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        });
+        await loadWorkbook(file);
+        setModeBadge('auto', false);
+        // Show refresh button, hide manual upload in intro
+        uploadLabel.hidden = true;
+        autoFetchBtn.hidden = false;
+      } catch (err) {
+        // Fallback to manual mode
+        console.warn('[DataMode] Auto fetch gagal, fallback ke manual:', err.message);
+        setModeBadge('manual', true);
+        showNotice(
+          `Mode auto: file "${filePath}" tidak dapat diakses (${err.message}). ` +
+          'Beralih ke mode manual — silakan upload file Excel secara manual.'
+        );
+        uploadLabel.hidden = false;
+        uploadLabel.classList.add('auto-fallback');
+        autoFetchBtn.hidden = true;
+      } finally {
+        $('loading-overlay').hidden = true;
+      }
+    }
+
+    if (mode === 'auto') {
+      // Trigger auto fetch on load
+      fetchAutoFile();
+      // Wire refresh button
+      autoFetchBtn.addEventListener('click', fetchAutoFile);
+    } else {
+      // Manual mode: normal UI
+      setModeBadge('manual', false);
+      uploadLabel.hidden = false;
+      autoFetchBtn.hidden = true;
+    }
+  })();
+
 
   async function loadWorkbook(file) {
     hideNotice();
@@ -99,89 +167,89 @@
     drawScatterChart(scatterData());
   }
   function trendData() {
-    const offset=7*60*60*1000, buckets=new Map();
-    state.rows.forEach((row)=>{
-      const time=parseLogDate(row[fields.time]),queryTime=number(row[fields.queryTime]);
-      if(!time||queryTime==null) return;
-      const hour=Math.floor((time.getTime()+offset)/3600000)*3600000-offset;
-      if(!buckets.has(hour)) buckets.set(hour,[]);
-      buckets.get(hour).push({queryTime,schema:String(row[fields.schema]||'(schema kosong)'),user:String(row[fields.user]||'(user kosong)'),path:String(row[fields.path]||'')});
+    const offset = 7 * 60 * 60 * 1000, buckets = new Map();
+    state.rows.forEach((row) => {
+      const time = parseLogDate(row[fields.time]), queryTime = number(row[fields.queryTime]);
+      if (!time || queryTime == null) return;
+      const hour = Math.floor((time.getTime() + offset) / 3600000) * 3600000 - offset;
+      if (!buckets.has(hour)) buckets.set(hour, []);
+      buckets.get(hour).push({ queryTime, schema: String(row[fields.schema] || '(schema kosong)'), user: String(row[fields.user] || '(user kosong)'), path: String(row[fields.path] || '') });
     });
-    const label=(time)=>new Intl.DateTimeFormat('id-ID',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit',hour12:false,timeZone:'Asia/Jakarta'}).format(new Date(time));
-    return [...buckets.entries()].sort((a,b)=>a[0]-b[0]).map(([time,records])=>{
-      const values=records.map((record)=>record.queryTime),schemaCounts=new Map();
-      records.forEach((record)=>schemaCounts.set(record.schema,(schemaCounts.get(record.schema)||0)+1));
-      const peak=records.reduce((best,record)=>record.queryTime>best.queryTime?record:best,records[0]);
-      const topSchema=[...schemaCounts.entries()].sort((a,b)=>b[1]-a[1])[0];
-      const min=values.reduce((best,value)=>Math.min(best,value),Infinity),max=values.reduce((best,value)=>Math.max(best,value),-Infinity);
-      return {time,label:label(time),value:average(values),count:values.length,min,max,peak,topSchema};
+    const label = (time) => new Intl.DateTimeFormat('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Jakarta' }).format(new Date(time));
+    return [...buckets.entries()].sort((a, b) => a[0] - b[0]).map(([time, records]) => {
+      const values = records.map((record) => record.queryTime), schemaCounts = new Map();
+      records.forEach((record) => schemaCounts.set(record.schema, (schemaCounts.get(record.schema) || 0) + 1));
+      const peak = records.reduce((best, record) => record.queryTime > best.queryTime ? record : best, records[0]);
+      const topSchema = [...schemaCounts.entries()].sort((a, b) => b[1] - a[1])[0];
+      const min = values.reduce((best, value) => Math.min(best, value), Infinity), max = values.reduce((best, value) => Math.max(best, value), -Infinity);
+      return { time, label: label(time), value: average(values), count: values.length, min, max, peak, topSchema };
     });
   }
   function drawTrendChart(points) {
-    const canvas=$('trend-chart'),empty=$('trend-empty'),rect=canvas.getBoundingClientRect();
-    if(!points.length||rect.width<2){canvas.hidden=true;empty.hidden=false;return;}
-    canvas.hidden=false;empty.hidden=true;
-    const ratio=window.devicePixelRatio||1;canvas.width=Math.round(rect.width*ratio);canvas.height=Math.round(rect.height*ratio);
-    const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);
-    const width=rect.width,height=rect.height,margin={left:48,right:14,top:15,bottom:34};
-    const plotW=width-margin.left-margin.right,plotH=height-margin.top-margin.bottom;
-    const max=Math.max(...points.map(point=>point.value),0.0001),hits=[];
-    ctx.fillStyle='#fff';ctx.fillRect(0,0,width,height);ctx.font='9px DM Sans, sans-serif';ctx.textBaseline='middle';
-    for(let i=0;i<=4;i++){
-      const y=margin.top+plotH*i/4,value=max*(1-i/4);
-      ctx.strokeStyle='#edf0f6';ctx.beginPath();ctx.moveTo(margin.left,y);ctx.lineTo(width-margin.right,y);ctx.stroke();
-      ctx.fillStyle='#98a3b5';ctx.textAlign='right';ctx.fillText(compact(value),margin.left-7,y);
+    const canvas = $('trend-chart'), empty = $('trend-empty'), rect = canvas.getBoundingClientRect();
+    if (!points.length || rect.width < 2) { canvas.hidden = true; empty.hidden = false; return; }
+    canvas.hidden = false; empty.hidden = true;
+    const ratio = window.devicePixelRatio || 1; canvas.width = Math.round(rect.width * ratio); canvas.height = Math.round(rect.height * ratio);
+    const ctx = canvas.getContext('2d'); ctx.scale(ratio, ratio);
+    const width = rect.width, height = rect.height, margin = { left: 48, right: 14, top: 15, bottom: 34 };
+    const plotW = width - margin.left - margin.right, plotH = height - margin.top - margin.bottom;
+    const max = Math.max(...points.map(point => point.value), 0.0001), hits = [];
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, width, height); ctx.font = '9px DM Sans, sans-serif'; ctx.textBaseline = 'middle';
+    for (let i = 0; i <= 4; i++) {
+      const y = margin.top + plotH * i / 4, value = max * (1 - i / 4);
+      ctx.strokeStyle = '#edf0f6'; ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(width - margin.right, y); ctx.stroke();
+      ctx.fillStyle = '#98a3b5'; ctx.textAlign = 'right'; ctx.fillText(compact(value), margin.left - 7, y);
     }
-    const slot=points.length>1?plotW/(points.length-1):0;
-    const coordinates=points.map((point,index)=>({x:points.length>1?margin.left+slot*index:margin.left+plotW/2,y:margin.top+plotH-(point.value/max)*plotH,point}));
-    if(coordinates.length>1){ctx.beginPath();coordinates.forEach((item,index)=>index?ctx.lineTo(item.x,item.y):ctx.moveTo(item.x,item.y));ctx.strokeStyle='#6658df';ctx.lineWidth=2;ctx.stroke();}
-    coordinates.forEach((item)=>{
-      ctx.beginPath();ctx.arc(item.x,item.y,3.5,0,Math.PI*2);ctx.fillStyle='#6658df';ctx.fill();ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();
-      hits.push({x:item.x-9,y:item.y-9,w:18,h:18,point:item.point});
+    const slot = points.length > 1 ? plotW / (points.length - 1) : 0;
+    const coordinates = points.map((point, index) => ({ x: points.length > 1 ? margin.left + slot * index : margin.left + plotW / 2, y: margin.top + plotH - (point.value / max) * plotH, point }));
+    if (coordinates.length > 1) { ctx.beginPath(); coordinates.forEach((item, index) => index ? ctx.lineTo(item.x, item.y) : ctx.moveTo(item.x, item.y)); ctx.strokeStyle = '#6658df'; ctx.lineWidth = 2; ctx.stroke(); }
+    coordinates.forEach((item) => {
+      ctx.beginPath(); ctx.arc(item.x, item.y, 3.5, 0, Math.PI * 2); ctx.fillStyle = '#6658df'; ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+      hits.push({ x: item.x - 9, y: item.y - 9, w: 18, h: 18, point: item.point });
     });
-    const labelCount=Math.min(points.length,7);
-    for(let i=0;i<labelCount;i++){
-      const index=labelCount===1?0:Math.round(i*(points.length-1)/(labelCount-1)),item=coordinates[index];
-      ctx.fillStyle='#8290a5';ctx.textAlign=index===0?'left':index===points.length-1?'right':'center';
-      ctx.fillText(item.point.label,item.x,height-13);
+    const labelCount = Math.min(points.length, 7);
+    for (let i = 0; i < labelCount; i++) {
+      const index = labelCount === 1 ? 0 : Math.round(i * (points.length - 1) / (labelCount - 1)), item = coordinates[index];
+      ctx.fillStyle = '#8290a5'; ctx.textAlign = index === 0 ? 'left' : index === points.length - 1 ? 'right' : 'center';
+      ctx.fillText(item.point.label, item.x, height - 13);
     }
-    bindTooltip(canvas,getTooltip(canvas),hits,(point)=>`<strong>${escapeHtml(point.label)} WIB</strong><span>Rata-rata query: ${point.value.toFixed(4)} detik</span><span>${point.count.toLocaleString('id-ID')} slow query</span><span>Tercepat: ${point.min.toFixed(4)} detik</span><span>Terlama: ${point.max.toFixed(4)} detik · ${escapeHtml(point.peak.user)}</span><span>Schema teratas: ${escapeHtml(point.topSchema[0])} · ${point.topSchema[1].toLocaleString('id-ID')} query</span>${point.peak.path?`<span>Path query terlama: ${escapeHtml(point.peak.path)}</span>`:''}`);
+    bindTooltip(canvas, getTooltip(canvas), hits, (point) => `<strong>${escapeHtml(point.label)} WIB</strong><span>Rata-rata query: ${point.value.toFixed(4)} detik</span><span>${point.count.toLocaleString('id-ID')} slow query</span><span>Tercepat: ${point.min.toFixed(4)} detik</span><span>Terlama: ${point.max.toFixed(4)} detik · ${escapeHtml(point.peak.user)}</span><span>Schema teratas: ${escapeHtml(point.topSchema[0])} · ${point.topSchema[1].toLocaleString('id-ID')} query</span>${point.peak.path ? `<span>Path query terlama: ${escapeHtml(point.peak.path)}</span>` : ''}`);
   }
   function scatterData() {
-    const points=[];
-    state.rows.forEach((row)=>{
-      const query=number(row[fields.queryTime]),response=number(row[fields.responseTime]);
-      if(query==null||response==null) return;
-      points.push({query,response,user:String(row[fields.user]||'(user kosong)'),path:String(row[fields.path]||''),time:String(row[fields.time]||'')});
+    const points = [];
+    state.rows.forEach((row) => {
+      const query = number(row[fields.queryTime]), response = number(row[fields.responseTime]);
+      if (query == null || response == null) return;
+      points.push({ query, response, user: String(row[fields.user] || '(user kosong)'), path: String(row[fields.path] || ''), time: String(row[fields.time] || '') });
     });
-    const step=Math.max(1,Math.ceil(points.length/1800));
-    return {points:points.filter((_,index)=>index%step===0),total:points.length};
+    const step = Math.max(1, Math.ceil(points.length / 1800));
+    return { points: points.filter((_, index) => index % step === 0), total: points.length };
   }
   function drawScatterChart(dataset) {
-    const canvas=$('scatter-chart'),empty=$('scatter-empty'),rect=canvas.getBoundingClientRect(),points=dataset.points;
-    if(!points.length||rect.width<2){canvas.hidden=true;empty.hidden=false;return;}
-    canvas.hidden=false;empty.hidden=true;
-    const ratio=window.devicePixelRatio||1;canvas.width=Math.round(rect.width*ratio);canvas.height=Math.round(rect.height*ratio);
-    const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);
-    const width=rect.width,height=rect.height,margin={left:47,right:14,top:14,bottom:36};
-    const plotW=width-margin.left-margin.right,plotH=height-margin.top-margin.bottom;
-    const maxX=Math.max(...points.map(point=>point.query),0.0001),maxY=Math.max(...points.map(point=>point.response),0.0001),hits=[];
-    ctx.fillStyle='#fff';ctx.fillRect(0,0,width,height);ctx.font='9px DM Sans, sans-serif';ctx.textBaseline='middle';
-    for(let i=0;i<=4;i++){
-      const x=margin.left+plotW*i/4,y=margin.top+plotH*(1-i/4);
-      ctx.strokeStyle='#edf0f6';ctx.beginPath();ctx.moveTo(x,margin.top);ctx.lineTo(x,height-margin.bottom);ctx.stroke();
-      ctx.beginPath();ctx.moveTo(margin.left,y);ctx.lineTo(width-margin.right,y);ctx.stroke();
-      ctx.fillStyle='#98a3b5';ctx.textAlign='center';ctx.fillText(compact(maxX*i/4),x,height-24);
-      ctx.textAlign='right';ctx.fillText(compact(maxY*i/4),margin.left-7,y);
+    const canvas = $('scatter-chart'), empty = $('scatter-empty'), rect = canvas.getBoundingClientRect(), points = dataset.points;
+    if (!points.length || rect.width < 2) { canvas.hidden = true; empty.hidden = false; return; }
+    canvas.hidden = false; empty.hidden = true;
+    const ratio = window.devicePixelRatio || 1; canvas.width = Math.round(rect.width * ratio); canvas.height = Math.round(rect.height * ratio);
+    const ctx = canvas.getContext('2d'); ctx.scale(ratio, ratio);
+    const width = rect.width, height = rect.height, margin = { left: 47, right: 14, top: 14, bottom: 36 };
+    const plotW = width - margin.left - margin.right, plotH = height - margin.top - margin.bottom;
+    const maxX = Math.max(...points.map(point => point.query), 0.0001), maxY = Math.max(...points.map(point => point.response), 0.0001), hits = [];
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, width, height); ctx.font = '9px DM Sans, sans-serif'; ctx.textBaseline = 'middle';
+    for (let i = 0; i <= 4; i++) {
+      const x = margin.left + plotW * i / 4, y = margin.top + plotH * (1 - i / 4);
+      ctx.strokeStyle = '#edf0f6'; ctx.beginPath(); ctx.moveTo(x, margin.top); ctx.lineTo(x, height - margin.bottom); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(width - margin.right, y); ctx.stroke();
+      ctx.fillStyle = '#98a3b5'; ctx.textAlign = 'center'; ctx.fillText(compact(maxX * i / 4), x, height - 24);
+      ctx.textAlign = 'right'; ctx.fillText(compact(maxY * i / 4), margin.left - 7, y);
     }
-    points.forEach((point)=>{
-      const x=margin.left+point.query/maxX*plotW,y=margin.top+plotH-point.response/maxY*plotH;
-      ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fillStyle='#4b9ce899';ctx.fill();
-      hits.push({x:x-5,y:y-5,w:10,h:10,point});
+    points.forEach((point) => {
+      const x = margin.left + point.query / maxX * plotW, y = margin.top + plotH - point.response / maxY * plotH;
+      ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fillStyle = '#4b9ce899'; ctx.fill();
+      hits.push({ x: x - 5, y: y - 5, w: 10, h: 10, point });
     });
-    ctx.fillStyle='#758197';ctx.textAlign='center';ctx.fillText('Query time (detik)',margin.left+plotW/2,height-5);
-    ctx.save();ctx.translate(10,margin.top+plotH/2);ctx.rotate(-Math.PI/2);ctx.fillText('Response time (detik)',0,0);ctx.restore();
-    bindTooltip(canvas,getTooltip(canvas),hits,(point)=>`<strong>${escapeHtml(point.user)}</strong><span>Query time: ${point.query.toFixed(4)} detik</span><span>Response time: ${point.response.toFixed(4)} detik</span><span>${escapeHtml(point.path||'Path kosong')}</span>`);
+    ctx.fillStyle = '#758197'; ctx.textAlign = 'center'; ctx.fillText('Query time (detik)', margin.left + plotW / 2, height - 5);
+    ctx.save(); ctx.translate(10, margin.top + plotH / 2); ctx.rotate(-Math.PI / 2); ctx.fillText('Response time (detik)', 0, 0); ctx.restore();
+    bindTooltip(canvas, getTooltip(canvas), hits, (point) => `<strong>${escapeHtml(point.user)}</strong><span>Query time: ${point.query.toFixed(4)} detik</span><span>Response time: ${point.response.toFixed(4)} detik</span><span>${escapeHtml(point.path || 'Path kosong')}</span>`);
   }
   function userData() {
     const users = new Map();
@@ -196,8 +264,8 @@
     return [...users.entries()].map(([label, paths]) => ({
       label, value: [...paths.values()].reduce((sum, count) => sum + count, 0),
       uniquePaths: paths.size,
-      tooltipLines: [...paths.entries()].sort((a,b) => b[1]-a[1]).map(([path,count]) => `${path} · ${count} kemunculan`)
-    })).sort((a,b) => b.value-a.value);
+      tooltipLines: [...paths.entries()].sort((a, b) => b[1] - a[1]).map(([path, count]) => `${path} · ${count} kemunculan`)
+    })).sort((a, b) => b.value - a.value);
   }
   function schemaData() {
     const groups = new Map();
@@ -208,7 +276,7 @@
       if (!groups.has(name)) groups.set(name, []);
       groups.get(name).push(value);
     });
-    return [...groups.entries()].map(([label, values]) => ({ label, value: average(values) })).sort((a,b) => b.value-a.value).slice(0, 7);
+    return [...groups.entries()].map(([label, values]) => ({ label, value: average(values) })).sort((a, b) => b.value - a.value).slice(0, 7);
   }
   function statusData() {
     const counts = new Map();
@@ -216,7 +284,7 @@
       const status = number(row[fields.status]);
       if (status != null) counts.set(String(Math.round(status)), (counts.get(String(Math.round(status))) || 0) + 1);
     });
-    return [...counts.entries()].map(([label, value]) => ({ label, value })).sort((a,b) => a.label.localeCompare(b.label, undefined, {numeric:true})).slice(0, 8);
+    return [...counts.entries()].map(([label, value]) => ({ label, value })).sort((a, b) => a.label.localeCompare(b.label, undefined, { numeric: true })).slice(0, 8);
   }
 
   function drawChart(canvasId, emptyId, points, color, decimal, unit) {
@@ -228,7 +296,7 @@
     canvas.width = Math.round(rect.width * ratio); canvas.height = Math.round(rect.height * ratio);
     const ctx = canvas.getContext('2d'); ctx.scale(ratio, ratio);
     const width = rect.width, height = rect.height;
-    const margin = {top: 14, right: 9, bottom: 38, left: 42};
+    const margin = { top: 14, right: 9, bottom: 38, left: 42 };
     const plotW = width - margin.left - margin.right, plotH = height - margin.top - margin.bottom;
     const max = Math.max(...points.map((point) => point.value), 0.0001);
     const hits = [];
@@ -245,9 +313,9 @@
       const barH = Math.max(2, point.value / max * plotH);
       const x = margin.left + index * slot + (slot - barW) / 2, y = margin.top + plotH - barH;
       roundedRect(ctx, x, y, barW, barH, Math.min(5, barW / 2)); ctx.fillStyle = color; ctx.fill();
-      hits.push({x, y, w:barW, h:barH, point});
+      hits.push({ x, y, w: barW, h: barH, point });
       ctx.fillStyle = '#758197'; ctx.textAlign = 'center';
-      const label = point.label.length > 10 ? `${point.label.slice(0,9)}…` : point.label;
+      const label = point.label.length > 10 ? `${point.label.slice(0, 9)}…` : point.label;
       ctx.fillText(label, x + barW / 2, height - 17);
     });
     bindTooltip(canvas, tooltip, hits, (point) => `<strong>${escapeHtml(point.label)}</strong><span>${decimal ? Number(point.value).toFixed(4) : point.value.toLocaleString('id-ID')} ${unit}</span>`);
@@ -256,7 +324,7 @@
   function drawUserChart(points) {
     const canvas = $('user-chart'), empty = $('user-empty'), area = canvas.parentElement;
     canvas.pinnedPoint = null;
-    if(canvas.chartTooltip) canvas.chartTooltip.hidden = true;
+    if (canvas.chartTooltip) canvas.chartTooltip.hidden = true;
     if (!points.length) { canvas.hidden = true; canvas.style.height = '100%'; area.style.height = ''; empty.hidden = false; return; }
     canvas.hidden = false; empty.hidden = true;
     const rowHeight = 27;
@@ -265,182 +333,457 @@
     area.style.height = `${height}px`;
     const rect = canvas.getBoundingClientRect(), ratio = window.devicePixelRatio || 1;
     canvas.width = Math.round(rect.width * ratio); canvas.height = Math.round(rect.height * ratio);
-    const ctx = canvas.getContext('2d'); ctx.setTransform(ratio,0,0,ratio,0,0);
-    const width = rect.width, h = rect.height, margin = {left:130,right:44,top:12,bottom:21};
-    const rowH = (h-margin.top-margin.bottom)/points.length;
+    const ctx = canvas.getContext('2d'); ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const width = rect.width, h = rect.height, margin = { left: 130, right: 44, top: 12, bottom: 21 };
+    const rowH = (h - margin.top - margin.bottom) / points.length;
     const max = Math.max(...points.map((point) => point.value), 1), tooltip = getTooltip(canvas), hits = [];
-    ctx.fillStyle='#ffffff';ctx.fillRect(0,0,width,h);ctx.font = '10px DM Sans, sans-serif'; ctx.textBaseline = 'middle';
-    margin.right=Math.max(margin.right,ctx.measureText(max.toLocaleString('id-ID')).width+18);
-    const chartW=Math.max(40,width-margin.left-margin.right);
-    for (let line=0; line<=4; line++) {
-      const x = margin.left + chartW*line/4;
-      ctx.strokeStyle='#edf0f6';ctx.beginPath();ctx.moveTo(x,margin.top);ctx.lineTo(x,h-margin.bottom);ctx.stroke();
-      ctx.fillStyle='#98a3b5';ctx.textAlign='center';ctx.fillText(Math.round(max*line/4).toLocaleString('id-ID'),x,h-9);
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, width, h); ctx.font = '10px DM Sans, sans-serif'; ctx.textBaseline = 'middle';
+    margin.right = Math.max(margin.right, ctx.measureText(max.toLocaleString('id-ID')).width + 18);
+    const chartW = Math.max(40, width - margin.left - margin.right);
+    for (let line = 0; line <= 4; line++) {
+      const x = margin.left + chartW * line / 4;
+      ctx.strokeStyle = '#edf0f6'; ctx.beginPath(); ctx.moveTo(x, margin.top); ctx.lineTo(x, h - margin.bottom); ctx.stroke();
+      ctx.fillStyle = '#98a3b5'; ctx.textAlign = 'center'; ctx.fillText(Math.round(max * line / 4).toLocaleString('id-ID'), x, h - 9);
     }
-    points.forEach((point,index) => {
-      const y=margin.top+index*rowH, barH=Math.min(15,rowH*.62), barW=Math.max(2,point.value/max*chartW);
-      ctx.fillStyle='#667085';ctx.textAlign='right';ctx.fillText(point.label.length>21?`${point.label.slice(0,20)}…`:point.label,margin.left-10,y+rowH/2);
-      roundedRect(ctx,margin.left,y+(rowH-barH)/2,barW,barH,5);ctx.fillStyle='#6b5ce7';ctx.fill();
-      ctx.fillStyle='#59667a';ctx.textAlign='left';ctx.fillText(point.value.toLocaleString('id-ID'),margin.left+barW+7,y+rowH/2);
-      hits.push({x:margin.left,y,w:chartW,h:rowH,point});
+    points.forEach((point, index) => {
+      const y = margin.top + index * rowH, barH = Math.min(15, rowH * .62), barW = Math.max(2, point.value / max * chartW);
+      ctx.fillStyle = '#667085'; ctx.textAlign = 'right'; ctx.fillText(point.label.length > 21 ? `${point.label.slice(0, 20)}…` : point.label, margin.left - 10, y + rowH / 2);
+      roundedRect(ctx, margin.left, y + (rowH - barH) / 2, barW, barH, 5); ctx.fillStyle = '#6b5ce7'; ctx.fill();
+      ctx.fillStyle = '#59667a'; ctx.textAlign = 'left'; ctx.fillText(point.value.toLocaleString('id-ID'), margin.left + barW + 7, y + rowH / 2);
+      hits.push({ x: margin.left, y, w: chartW, h: rowH, point });
     });
-    bindTooltip(canvas,tooltip,hits,(point,pinned) => `<strong>${escapeHtml(point.label)}</strong><span>${point.value.toLocaleString('id-ID')} total path · ${point.uniquePaths.toLocaleString('id-ID')} path unik</span><div class="tooltip-paths">${point.tooltipLines.slice(0,8).map((line)=>`<span>${escapeHtml(line)}</span>`).join('')}${point.tooltipLines.length>8?`<span>+ ${point.tooltipLines.length-8} path lainnya</span>`:''}</div>${pinned?`<button class="tooltip-export" type="button" data-export-path-user="${escapeHtml(point.label)}">Unduh Excel path</button>`:''}`, true);
+    bindTooltip(canvas, tooltip, hits, (point, pinned) => `<strong>${escapeHtml(point.label)}</strong><span>${point.value.toLocaleString('id-ID')} total path · ${point.uniquePaths.toLocaleString('id-ID')} path unik</span><div class="tooltip-paths">${point.tooltipLines.slice(0, 8).map((line) => `<span>${escapeHtml(line)}</span>`).join('')}${point.tooltipLines.length > 8 ? `<span>+ ${point.tooltipLines.length - 8} path lainnya</span>` : ''}</div>${pinned ? `<button class="tooltip-export" type="button" data-export-path-user="${escapeHtml(point.label)}">Unduh Excel path</button>` : ''}`, true);
   }
   function getTooltip(canvas) {
-    let tooltip=canvas.chartTooltip;
-    if(!tooltip){tooltip=document.createElement('div');tooltip.className='chart-tooltip';tooltip.hidden=true;document.body.append(tooltip);canvas.chartTooltip=tooltip;}
+    let tooltip = canvas.chartTooltip;
+    if (!tooltip) { tooltip = document.createElement('div'); tooltip.className = 'chart-tooltip'; tooltip.hidden = true; document.body.append(tooltip); canvas.chartTooltip = tooltip; }
     return tooltip;
   }
-  function bindTooltip(canvas,tooltip,hits,content,pinOnClick=false) {
-    const findHit=(event)=>{
-      const rect=canvas.getBoundingClientRect(),x=event.clientX-rect.left,y=event.clientY-rect.top;
-      return hits.find((item)=>x>=item.x&&x<=item.x+item.w&&y>=item.y&&y<=item.y+item.h);
+  function bindTooltip(canvas, tooltip, hits, content, pinOnClick = false) {
+    const findHit = (event) => {
+      const rect = canvas.getBoundingClientRect(), x = event.clientX - rect.left, y = event.clientY - rect.top;
+      return hits.find((item) => x >= item.x && x <= item.x + item.w && y >= item.y && y <= item.y + item.h);
     };
-    const show=(point,event,pinned)=>{
-      tooltip.innerHTML=content(point,pinned);tooltip.hidden=false;
-      tooltip.style.left=`${Math.max(8,Math.min(event.clientX+14,window.innerWidth-tooltip.offsetWidth-8))}px`;
-      tooltip.style.top=`${Math.max(8,Math.min(event.clientY-18,window.innerHeight-tooltip.offsetHeight-8))}px`;
+    const show = (point, event, pinned) => {
+      tooltip.innerHTML = content(point, pinned); tooltip.hidden = false;
+      tooltip.style.left = `${Math.max(8, Math.min(event.clientX + 14, window.innerWidth - tooltip.offsetWidth - 8))}px`;
+      tooltip.style.top = `${Math.max(8, Math.min(event.clientY - 18, window.innerHeight - tooltip.offsetHeight - 8))}px`;
     };
-    canvas.onmousemove=(event)=>{
-      if(canvas.pinnedPoint) return;
-      const hit=findHit(event);
-      if(!hit){tooltip.hidden=true;canvas.style.cursor='default';return;}
-      show(hit.point,event,false);canvas.style.cursor='pointer';
+    canvas.onmousemove = (event) => {
+      if (canvas.pinnedPoint) return;
+      const hit = findHit(event);
+      if (!hit) { tooltip.hidden = true; canvas.style.cursor = 'default'; return; }
+      show(hit.point, event, false); canvas.style.cursor = 'pointer';
     };
-    canvas.onclick=pinOnClick?(event)=>{
-      const hit=findHit(event);
-      if(!hit){canvas.pinnedPoint=null;tooltip.hidden=true;return;}
-      if(canvas.pinnedPoint?.label===hit.point.label){canvas.pinnedPoint=null;tooltip.hidden=true;return;}
-      canvas.pinnedPoint=hit.point;show(hit.point,event,true);
-    }:null;
-    canvas.onmouseleave=()=>{if(!canvas.pinnedPoint)tooltip.hidden=true;canvas.style.cursor='default';};
+    canvas.onclick = pinOnClick ? (event) => {
+      const hit = findHit(event);
+      if (!hit) { canvas.pinnedPoint = null; tooltip.hidden = true; return; }
+      if (canvas.pinnedPoint?.label === hit.point.label) { canvas.pinnedPoint = null; tooltip.hidden = true; return; }
+      canvas.pinnedPoint = hit.point; show(hit.point, event, true);
+    } : null;
+    canvas.onmouseleave = () => { if (!canvas.pinnedPoint) tooltip.hidden = true; canvas.style.cursor = 'default'; };
   }
   function compact(value) { return value === 0 ? '0' : value >= 10 ? value.toFixed(0) : value >= 1 ? value.toFixed(1) : value >= 0.01 ? value.toFixed(2) : value.toFixed(4); }
-  function roundedRect(ctx,x,y,w,h,r) { ctx.beginPath(); ctx.roundRect(x,y,w,h,[r,r,0,0]); }
+  function roundedRect(ctx, x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, [r, r, 0, 0]); }
 
   function filterRows(query) {
     const term = query.trim().toLocaleLowerCase('id-ID');
     state.filtered = state.rows.filter((row) => {
       const matchesUser = !state.selectedUser || String(row[fields.user] || '(user kosong)') === state.selectedUser;
-      const matchesTerm = !term || [fields.time,fields.user,fields.schema,fields.queryTime,fields.status,fields.responseTime,fields.path,fields.referer,fields.query].some((key) => String(row[key] ?? '').toLocaleLowerCase('id-ID').includes(term));
+      const matchesTerm = !term || [fields.time, fields.user, fields.schema, fields.queryTime, fields.status, fields.responseTime, fields.path, fields.referer, fields.query].some((key) => String(row[key] ?? '').toLocaleLowerCase('id-ID').includes(term));
       return matchesUser && matchesTerm;
     });
     state.page = 0; renderTable();
   }
   function populateUsers() {
-    const select=$('user-filter'), selected=state.selectedUser;
-    select.innerHTML='<option value="">Semua user</option>';
-    [...new Set(state.rows.map((row)=>String(row[fields.user]||'(user kosong)')))].sort((a,b)=>a.localeCompare(b)).forEach((user)=>{
-      const option=document.createElement('option');option.value=user;option.textContent=user;select.append(option);
+    const select = $('user-filter'), selected = state.selectedUser;
+    select.innerHTML = '<option value="">Semua user</option>';
+    [...new Set(state.rows.map((row) => String(row[fields.user] || '(user kosong)')))].sort((a, b) => a.localeCompare(b)).forEach((user) => {
+      const option = document.createElement('option'); option.value = user; option.textContent = user; select.append(option);
     });
-    if([...select.options].some((option)=>option.value===selected)){select.value=selected;}else{state.selectedUser='';}
+    if ([...select.options].some((option) => option.value === selected)) { select.value = selected; } else { state.selectedUser = ''; }
   }
   function renderTable() {
-    state.displayRows = state.uniqueMode ? uniqueRows(state.filtered) : state.filtered.map((row) => ({...row,__count:1}));
+    state.displayRows = state.uniqueMode ? uniqueRows(state.filtered) : state.filtered.map((row) => ({ ...row, __count: 1 }));
     const total = state.displayRows.length, pages = Math.max(1, Math.ceil(total / state.pageSize));
     state.page = Math.min(Math.max(state.page, 0), pages - 1);
     const start = state.page * state.pageSize;
     $('log-rows').innerHTML = state.displayRows.slice(start, start + state.pageSize).map((row) => {
       const status = number(row[fields.status]);
       const statusClass = status == null ? '' : status >= 500 ? 'status-error' : status >= 400 ? 'status-warn' : 'status-ok';
-      return `<tr><td>${escapeHtml(display(row[fields.time]))}</td><td>${escapeHtml(display(row[fields.user]))}</td><td>${escapeHtml(display(row[fields.schema]))}</td><td>${Number(row.__count||1).toLocaleString('id-ID')}</td><td>${escapeHtml(formatSeconds(number(row[fields.queryTime])))}</td><td>${status == null ? '—' : `<span class="status-pill ${statusClass}">${escapeHtml(Math.round(status))}</span>`}</td><td>${escapeHtml(formatSeconds(number(row[fields.responseTime])))}</td><td title="${escapeHtml(row[fields.path])}">${escapeHtml(display(row[fields.path]))}</td><td title="${escapeHtml(row[fields.referer])}">${escapeHtml(display(row[fields.referer]))}</td><td title="${escapeHtml(row[fields.query])}">${escapeHtml(display(row[fields.query]))}</td></tr>`;
+      return `<tr><td>${escapeHtml(display(row[fields.time]))}</td><td>${escapeHtml(display(row[fields.user]))}</td><td>${escapeHtml(display(row[fields.schema]))}</td><td>${Number(row.__count || 1).toLocaleString('id-ID')}</td><td>${escapeHtml(formatSeconds(number(row[fields.queryTime])))}</td><td>${status == null ? '—' : `<span class="status-pill ${statusClass}">${escapeHtml(Math.round(status))}</span>`}</td><td>${escapeHtml(formatSeconds(number(row[fields.responseTime])))}</td><td title="${escapeHtml(row[fields.path])}">${escapeHtml(display(row[fields.path]))}</td><td title="${escapeHtml(row[fields.referer])}">${escapeHtml(display(row[fields.referer]))}</td><td title="${escapeHtml(row[fields.query])}">${escapeHtml(display(row[fields.query]))}</td></tr>`;
     }).join('');
     const range = dateRangeText(state.filtered);
     const summary = state.uniqueMode
       ? `${total.toLocaleString('id-ID')} baris unik dari ${state.filtered.length.toLocaleString('id-ID')} baris`
       : `${total.toLocaleString('id-ID')} baris`;
     $('table-count').textContent = `${summary}${range ? ` - ${range}` : ''}`;
-    $('page-info').textContent = total ? `${(start+1).toLocaleString('id-ID')}–${Math.min(start+state.pageSize,total).toLocaleString('id-ID')} dari ${total.toLocaleString('id-ID')}` : 'Tidak ada baris yang cocok';
+    $('page-info').textContent = total ? `${(start + 1).toLocaleString('id-ID')}–${Math.min(start + state.pageSize, total).toLocaleString('id-ID')} dari ${total.toLocaleString('id-ID')}` : 'Tidak ada baris yang cocok';
     $('previous-page').disabled = state.page === 0; $('next-page').disabled = state.page >= pages - 1;
   }
   function uniqueRows(rows) {
     const groups = new Map();
     rows.forEach((row) => {
       const identity = row[fields.path]
-        ? [fields.user,fields.path]
-        : [fields.user,fields.path,fields.time,fields.schema,fields.query,fields.queryTime,fields.status,fields.responseTime,fields.referer];
+        ? [fields.user, fields.path]
+        : [fields.user, fields.path, fields.time, fields.schema, fields.query, fields.queryTime, fields.status, fields.responseTime, fields.referer];
       const key = JSON.stringify(identity.map((field) => row[field] ?? ''));
-      if (!groups.has(key)) groups.set(key,{row:{...row,__count:0},queryTotal:0,queryCount:0,responseTotal:0,responseCount:0,latest:parseLogDate(row[fields.time])});
-      const group=groups.get(key);
+      if (!groups.has(key)) groups.set(key, { row: { ...row, __count: 0 }, queryTotal: 0, queryCount: 0, responseTotal: 0, responseCount: 0, latest: parseLogDate(row[fields.time]) });
+      const group = groups.get(key);
       group.row.__count++;
-      const queryTime=number(row[fields.queryTime]),responseTime=number(row[fields.responseTime]),date=parseLogDate(row[fields.time]);
-      if(queryTime!=null){group.queryTotal+=queryTime;group.queryCount++;}
-      if(responseTime!=null){group.responseTotal+=responseTime;group.responseCount++;}
-      if(date&&(!group.latest||date>group.latest)){group.latest=date;group.row[fields.time]=row[fields.time];}
+      const queryTime = number(row[fields.queryTime]), responseTime = number(row[fields.responseTime]), date = parseLogDate(row[fields.time]);
+      if (queryTime != null) { group.queryTotal += queryTime; group.queryCount++; }
+      if (responseTime != null) { group.responseTotal += responseTime; group.responseCount++; }
+      if (date && (!group.latest || date > group.latest)) { group.latest = date; group.row[fields.time] = row[fields.time]; }
     });
-    return [...groups.values()].map((group)=>{
-      if(group.queryCount) group.row[fields.queryTime]=group.queryTotal/group.queryCount;
-      if(group.responseCount) group.row[fields.responseTime]=group.responseTotal/group.responseCount;
+    return [...groups.values()].map((group) => {
+      if (group.queryCount) group.row[fields.queryTime] = group.queryTotal / group.queryCount;
+      if (group.responseCount) group.row[fields.responseTime] = group.responseTotal / group.responseCount;
       return group.row;
     });
   }
   function dateRangeText(rows) {
-    const dates=rows.map((row)=>parseLogDate(row[fields.time])).filter(Boolean).sort((a,b)=>a-b);
-    if(!dates.length) return '';
-    const format=(date)=>new Intl.DateTimeFormat('id-ID',{day:'numeric',month:'long',year:'numeric',timeZone:'Asia/Jakarta'}).format(date);
-    const first=format(dates[0]),last=format(dates[dates.length-1]);
-    return first===last?first:`${first} s.d. ${last}`;
+    const dates = rows.map((row) => parseLogDate(row[fields.time])).filter(Boolean).sort((a, b) => a - b);
+    if (!dates.length) return '';
+    const format = (date) => new Intl.DateTimeFormat('id-ID', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Jakarta' }).format(date);
+    const first = format(dates[0]), last = format(dates[dates.length - 1]);
+    return first === last ? first : `${first} s.d. ${last}`;
   }
   function parseLogDate(value) {
-    if(value instanceof Date) return Number.isNaN(value.getTime())?null:value;
-    if(value==null||value==='') return null;
-    const text=String(value).trim();
-    const kibana=text.match(/^([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{4})\s*@\s*(\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/);
-    const parsed=kibana?new Date(`${kibana[1]} ${kibana[2]}, ${kibana[3]} ${kibana[4]} GMT+0700`):new Date(text);
-    return Number.isNaN(parsed.getTime())?null:parsed;
+    if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+    if (value == null || value === '') return null;
+    const text = String(value).trim();
+    const kibana = text.match(/^([A-Za-z]{3})\s+(\d{1,2}),\s*(\d{4})\s*@\s*(\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/);
+    const parsed = kibana ? new Date(`${kibana[1]} ${kibana[2]}, ${kibana[3]} ${kibana[4]} GMT+0700`) : new Date(text);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
   }
   function showNotice(message) { $('notice').textContent = message; $('notice').hidden = false; }
   function hideNotice() { $('notice').hidden = true; }
   function downloadChart(canvasId) {
-    const canvas=$(canvasId);
-    if(canvas.hidden||!canvas.width) return showNotice('Grafik belum memiliki data untuk diunduh.');
-    const names={'user-chart':'path-per-user','schema-chart':'query-time-per-schema','status-chart':'status-http'};
-    const link=document.createElement('a');link.href=canvas.toDataURL('image/png');link.download=`${names[canvasId]||'grafik'}.png`;link.click();
+    const canvas = $(canvasId);
+    if (canvas.hidden || !canvas.width) return showNotice('Grafik belum memiliki data untuk diunduh.');
+    const names = { 'user-chart': 'path-per-user', 'schema-chart': 'query-time-per-schema', 'status-chart': 'status-http' };
+    const link = document.createElement('a'); link.href = canvas.toDataURL('image/png'); link.download = `${names[canvasId] || 'grafik'}.png`; link.click();
   }
-  function exportFilteredExcel() {
-    if(!window.XLSX) return showNotice('Library Excel belum termuat. Periksa koneksi internet lalu muat ulang halaman.');
-    if(!state.displayRows.length) return showNotice('Tidak ada baris hasil filter untuk diunduh.');
-    const columns=[
-      ['Waktu',fields.time,24],['User MySQL',fields.user,22],['Schema',fields.schema,20],['Jumlah','__count',12],['Query time (detik)',fields.queryTime,18],
-      ['HTTP status',fields.status,14],['Response time (detik)',fields.responseTime,22],['Path',fields.path,42],['Referer',fields.referer,48],['Query',fields.query,60]
-    ];
-    const values=state.displayRows.map((row)=>columns.map(([,field])=>{
-      if(field==='__count') return row.__count||1;
-      if(field===fields.queryTime||field===fields.responseTime||field===fields.status) return number(row[field]);
-      return row[field]??'';
-    }));
-    const worksheet=XLSX.utils.aoa_to_sheet([columns.map(([title])=>title),...values]);
-    worksheet['!cols']=columns.map(([, ,wch])=>({wch}));
-    worksheet['!rows']=[{hpt:24}];
-    worksheet['!autofilter']={ref:XLSX.utils.encode_range({s:{r:0,c:0},e:{r:state.displayRows.length,c:columns.length-1}})};
-    for(let row=1;row<=state.displayRows.length;row++){
-      for(const column of [4,6]){const cell=worksheet[XLSX.utils.encode_cell({r:row,c:column})];if(cell)cell.z='0.0000';}
-      for(const column of [3,5]){const cell=worksheet[XLSX.utils.encode_cell({r:row,c:column})];if(cell)cell.z='0';}
+  // ─── Query Classification ────────────────────────────────────────────────────
+  function parseMainTable(q) {
+    // Strip leading SET/session statements before the real query
+    const cleaned = q.replace(/^\s*(SET\s+\S+\s*=\s*\S+\s*;?\s*)*/i, '').trim();
+    const fromMatch = cleaned.match(/\bFROM\s+`?(\w+)`?/i);
+    const intoMatch = cleaned.match(/\bINTO\s+`?(\w+)`?/i);
+    const updateMatch = cleaned.match(/^UPDATE\s+`?(\w+)`?/i);
+    return fromMatch?.[1] || intoMatch?.[1] || updateMatch?.[1] || null;
+  }
+
+  function getSelectColumns(q) {
+    const m = q.match(/^SELECT\s+(.*?)\s+FROM\b/is);
+    if (!m) return null;
+    const cols = m[1].trim();
+    if (cols === '*') return 'semua kolom (*)';
+    if (cols.toUpperCase().startsWith('COUNT(')) return 'jumlah baris (COUNT)';
+    if (cols.toUpperCase().startsWith('SUM(')) return 'total nilai (SUM)';
+    if (cols.toUpperCase().startsWith('AVG(')) return 'rata-rata (AVG)';
+    if (cols.toUpperCase().startsWith('MAX(') || cols.toUpperCase().startsWith('MIN(')) return 'nilai maks/min';
+    const list = cols.split(',').map(c => c.trim().replace(/`/g, '').split('.').pop());
+    if (list.length <= 3) return `kolom: ${list.join(', ')}`;
+    return `${list.length} kolom spesifik`;
+  }
+
+  function classifyQuery(queryText) {
+    if (!queryText || String(queryText).trim() === '') return { k1: 'Tidak Diketahui', k2: '-' };
+    // Strip SET timestamp and similar session preambles
+    const stripped = String(queryText).replace(/^\s*(SET\s+\S+\s*=\s*[^;]+;\s*)+/i, '').trim();
+    const q = stripped;
+    const qUp = q.toUpperCase().replace(/\s+/g, ' ');
+    const table = parseMainTable(q) || '(tabel tidak diketahui)';
+
+    if (qUp.match(/^SELECT\b/)) {
+      const k1 = 'SELECT';
+      const cols = getSelectColumns(q) || 'data';
+      const hasJoin = /\bJOIN\b/.test(qUp);
+      const joinCount = hasJoin ? (qUp.match(/\bJOIN\b/g) || []).length : 0;
+      const hasWhere = /\bWHERE\b/.test(qUp);
+      const hasLike = /\bLIKE\b/.test(qUp);
+      const hasGroup = /\bGROUP BY\b/.test(qUp);
+      const hasHaving = /\bHAVING\b/.test(qUp);
+      const hasOrder = /\bORDER BY\b/.test(qUp);
+      const hasLimit = /\bLIMIT\b/.test(qUp);
+      const hasSubquery = /\bIN\s*\(SELECT\b/.test(qUp);
+
+      let desc = `Ambil ${cols} dari \`${table}\``;
+      if (hasSubquery) desc += ', dengan subquery';
+      else if (joinCount >= 3) desc += `, gabungkan ${joinCount} tabel`;
+      else if (joinCount === 2) desc += `, gabungkan 2 tabel`;
+      else if (joinCount === 1) desc += `, gabungkan tabel lain`;
+      if (hasLike) desc += ', filter LIKE (pencarian pola)';
+      else if (hasWhere) desc += ', dengan filter kondisi';
+      if (hasGroup && hasHaving) desc += ', dikelompokkan & disaring';
+      else if (hasGroup) desc += ', dikelompokkan';
+      if (hasOrder && hasLimit) desc += ', diurutkan & dibatasi';
+      else if (hasOrder) desc += ', diurutkan';
+      else if (hasLimit) desc += ', dibatasi jumlahnya';
+      return { k1, k2: desc };
     }
-    const workbook=XLSX.utils.book_new();XLSX.utils.book_append_sheet(workbook,worksheet,'Merged Logs');
-    const date=new Date().toISOString().slice(0,10);
-    XLSX.writeFile(workbook,`merged-logs-filtered-${date}.xlsx`);
+
+    if (qUp.match(/^INSERT\b/)) {
+      if (/\bON\s+DUPLICATE\s+KEY\b/.test(qUp)) return { k1: 'INSERT', k2: `Sisip atau perbarui data di \`${table}\` (upsert)` };
+      if (/\bINSERT\s+INTO\b.*\bSELECT\b/is.test(q)) return { k1: 'INSERT', k2: `Salin data hasil SELECT ke \`${table}\`` };
+      return { k1: 'INSERT', k2: `Tambah data baru ke \`${table}\`` };
+    }
+
+    if (qUp.match(/^UPDATE\b/)) {
+      const hasJoin = /\bJOIN\b/.test(qUp);
+      const hasWhere = /\bWHERE\b/.test(qUp);
+      let desc = `Perbarui data di \`${table}\``;
+      if (hasJoin) desc += ', melibatkan tabel lain (JOIN)';
+      if (hasWhere) desc += ', dengan kondisi filter';
+      return { k1: 'UPDATE', k2: desc };
+    }
+
+    if (qUp.match(/^DELETE\b/)) {
+      const hasWhere = /\bWHERE\b/.test(qUp);
+      return { k1: 'DELETE', k2: `Hapus data dari \`${table}\`${hasWhere ? ', dengan kondisi filter' : ' (semua baris!)'}` };
+    }
+
+    if (qUp.match(/^CALL\b/)) {
+      const procMatch = q.match(/CALL\s+`?(\w+)`?/i);
+      return { k1: 'CALL', k2: `Jalankan stored procedure \`${procMatch?.[1] || '?'}\`` };
+    }
+
+    if (qUp.match(/^CREATE\b/)) {
+      const type = qUp.includes('TABLE') ? 'tabel' : qUp.includes('INDEX') ? 'indeks' : qUp.includes('VIEW') ? 'view' : 'objek';
+      return { k1: 'DDL', k2: `Buat ${type} baru (\`${table}\`)` };
+    }
+    if (qUp.match(/^ALTER\b/)) return { k1: 'DDL', k2: `Ubah struktur tabel \`${table}\`` };
+    if (qUp.match(/^DROP\b/)) return { k1: 'DDL', k2: `Hapus struktur/tabel \`${table}\`` };
+    if (qUp.match(/^TRUNCATE\b/)) return { k1: 'DDL', k2: `Kosongkan seluruh data tabel \`${table}\`` };
+    if (qUp.match(/^(SHOW|DESCRIBE|EXPLAIN)\b/)) return { k1: 'SHOW', k2: 'Tampilkan informasi / struktur database' };
+    if (qUp.match(/^(SET|COMMIT|ROLLBACK|BEGIN|START\s+TRANSACTION)\b/)) return { k1: 'SESSION', k2: 'Perintah sesi atau transaksi database' };
+
+    return { k1: 'Lainnya', k2: `Perintah tidak dikenal pada objek \`${table}\`` };
+  }
+
+  // ─── Analysis & Export ────────────────────────────────────────────────────────
+  function buildSummarySheet(rows) {
+    const queryTimes = rows.map((r) => number(r[fields.queryTime])).filter((v) => v != null);
+    const responseTimes = rows.map((r) => number(r[fields.responseTime])).filter((v) => v != null);
+    const statuses = rows.map((r) => number(r[fields.status])).filter((v) => v != null);
+    const avg = (arr) => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null;
+    const pct = (n, d) => d ? `${(n / d * 100).toFixed(1)}%` : '0%';
+    const f4 = (v) => v != null ? Number(v.toFixed(4)) : '-';
+
+    const total = rows.length;
+    const errors = statuses.filter((s) => s >= 400).length;
+    const clientErr = statuses.filter((s) => s >= 400 && s < 500).length;
+    const serverErr = statuses.filter((s) => s >= 500).length;
+    const avgQt = avg(queryTimes), maxQt = queryTimes.length ? Math.max(...queryTimes) : null, minQt = queryTimes.length ? Math.min(...queryTimes) : null;
+    const avgRt = avg(responseTimes), maxRt = responseTimes.length ? Math.max(...responseTimes) : null;
+    const normal = queryTimes.filter((t) => t < 1).length;
+    const slow = queryTimes.filter((t) => t >= 1 && t < 5).length;
+    const verySlow = queryTimes.filter((t) => t >= 5).length;
+
+    // Klasifikasi 1 distribution
+    const k1Map = new Map();
+    rows.forEach((r) => {
+      const { k1 } = classifyQuery(r[fields.query]);
+      k1Map.set(k1, (k1Map.get(k1) || 0) + 1);
+    });
+    const k1Ranked = [...k1Map.entries()].sort((a, b) => b[1] - a[1]);
+
+    // Klasifikasi 2 distribution (top occurrences)
+    const k2Map = new Map();
+    rows.forEach((r) => {
+      const { k2 } = classifyQuery(r[fields.query]);
+      k2Map.set(k2, (k2Map.get(k2) || 0) + 1);
+    });
+    const k2Ranked = [...k2Map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
+
+    // Top 10 user
+    const userMap = new Map();
+    rows.forEach((r) => {
+      const user = String(r[fields.user] || '(user kosong)');
+      const qt = number(r[fields.queryTime]);
+      if (!userMap.has(user)) userMap.set(user, { count: 0, total: 0, max: 0 });
+      const u = userMap.get(user); u.count++;
+      if (qt != null) { u.total += qt; u.max = Math.max(u.max, qt); }
+    });
+    const userRanked = [...userMap.entries()].sort((a, b) => b[1].total - a[1].total).slice(0, 10);
+
+    // Top 10 schema
+    const schMap = new Map();
+    rows.forEach((r) => {
+      const sch = String(r[fields.schema] || '(kosong)');
+      const qt = number(r[fields.queryTime]);
+      if (!schMap.has(sch)) schMap.set(sch, { count: 0, total: 0, max: 0 });
+      const s = schMap.get(sch); s.count++;
+      if (qt != null) { s.total += qt; s.max = Math.max(s.max, qt); }
+    });
+    const schRanked = [...schMap.entries()].sort((a, b) => (b[1].total / (b[1].count || 1)) - (a[1].total / (a[1].count || 1))).slice(0, 10);
+
+    // Status dist
+    const stMap = new Map();
+    statuses.forEach((s) => { const k = String(Math.round(s)); stMap.set(k, (stMap.get(k) || 0) + 1); });
+    const stRanked = [...stMap.entries()].sort((a, b) => b[1] - a[1]);
+
+    // Top 5 slowest
+    const top5 = [...rows].filter((r) => number(r[fields.queryTime]) != null)
+      .sort((a, b) => (number(b[fields.queryTime]) || 0) - (number(a[fields.queryTime]) || 0)).slice(0, 5)
+      .map((r) => {
+        const { k1, k2 } = classifyQuery(r[fields.query]);
+        return [String(r[fields.time] || '-'), String(r[fields.user] || '-'), String(r[fields.schema] || '-'),
+        f4(number(r[fields.queryTime])), k1, k2, String(r[fields.path] || '-')];
+      });
+
+    const nl = [[]], H = (t) => [t];
+    const ts = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
+
+    const data = [
+      ['SUMMARY REPORT — SLOW QUERY LOG ANALYZER'],
+      [`Dibuat: ${ts}   |   Total data: ${total.toLocaleString('id-ID')} baris`],
+      nl[0],
+      // ── 1. KPI ──
+      ['━━━ RINGKASAN KINERJA ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['Metrik', 'Nilai', 'Satuan'],
+      ['Total Log Dianalisa', total, 'baris'],
+      ['Query Time — Rata-rata', f4(avgQt), 'detik'],
+      ['Query Time — Tercepat', f4(minQt), 'detik'],
+      ['Query Time — Terlama', f4(maxQt), 'detik'],
+      ['Response Time — Rata-rata', f4(avgRt), 'detik'],
+      ['Response Time — Tertinggi', f4(maxRt), 'detik'],
+      ['Total HTTP Error (4xx+5xx)', errors, `${pct(errors, statuses.length)} dari seluruh request`],
+      nl[0],
+      // ── 2. Kecepatan Query ──
+      ['━━━ DISTRIBUSI KECEPATAN QUERY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['Kategori', 'Jumlah', 'Persentase', 'Threshold'],
+      ['Normal', normal, pct(normal, total), '< 1 detik'],
+      ['Lambat', slow, pct(slow, total), '1 – 5 detik'],
+      ['Sangat Lambat', verySlow, pct(verySlow, total), '>= 5 detik'],
+      nl[0],
+      // ── 3. Klasifikasi 1 ──
+      ['━━━ DISTRIBUSI TIPE QUERY (KLASIFIKASI 1) ━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['Tipe Query', 'Jumlah', 'Persentase'],
+      ...k1Ranked.map(([k, n]) => [k, n, pct(n, total)]),
+      nl[0],
+      // ── 4. Klasifikasi 2 (top 15) ──
+      ['━━━ TOP 15 TUJUAN QUERY (KLASIFIKASI 2) ━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['Deskripsi Tujuan Query', 'Jumlah', 'Persentase'],
+      ...k2Ranked.map(([k, n]) => [k, n, pct(n, total)]),
+      nl[0],
+      // ── 5. Top User ──
+      ['━━━ TOP 10 USER — TOTAL QUERY TIME ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['User MySQL', 'Jumlah Log', 'Total Qt (det)', 'Rata-rata Qt (det)', 'Maks Qt (det)'],
+      ...userRanked.map(([u, d]) => [u, d.count, f4(d.total), f4(d.count ? d.total / d.count : 0), f4(d.max)]),
+      nl[0],
+      // ── 6. Top Schema ──
+      ['━━━ TOP 10 SCHEMA — RATA-RATA QUERY TIME ━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['Schema', 'Jumlah Log', 'Total Qt (det)', 'Rata-rata Qt (det)', 'Maks Qt (det)'],
+      ...schRanked.map(([s, d]) => [s, d.count, f4(d.total), f4(d.count ? d.total / d.count : 0), f4(d.max)]),
+      nl[0],
+      // ── 7. HTTP Status ──
+      ['━━━ DISTRIBUSI HTTP STATUS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['HTTP Status', 'Jumlah', 'Persentase', 'Kategori'],
+      ...stRanked.map(([s, n]) => {
+        const c = Number(s);
+        const cat = c >= 500 ? 'Server Error (5xx)' : c >= 400 ? 'Client Error (4xx)' : c >= 300 ? 'Redirect (3xx)' : 'Sukses (2xx)';
+        return [s, n, pct(n, statuses.length), cat];
+      }),
+      ['— Client Error (4xx)', clientErr, pct(clientErr, statuses.length), ''],
+      ['— Server Error (5xx)', serverErr, pct(serverErr, statuses.length), ''],
+      nl[0],
+      // ── 8. Top 5 Lambat ──
+      ['━━━ 5 QUERY PALING LAMBAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ['Waktu', 'User MySQL', 'Schema', 'Qt (det)', 'Klasif. 1', 'Klasif. 2 (Tujuan)', 'Path'],
+      ...top5,
+      nl[0],
+      // ── 9. Rekomendasi ──
+      ['━━━ REKOMENDASI OTOMATIS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
+      ...(verySlow > 0 ? [[`[!] ${verySlow} query >= 5 detik — evaluasi indeks & struktur query`]] : []),
+      ...(errors > 0 ? [[`[!] ${errors} HTTP error — periksa log aplikasi & server`]] : []),
+      ...(k1Ranked[0] ? [[`[i] Tipe query dominan: ${k1Ranked[0][0]} (${k1Ranked[0][1]} kali — ${pct(k1Ranked[0][1], total)})`]] : []),
+      ...(k2Ranked[0] ? [[`[i] Tujuan query terbanyak: ${k2Ranked[0][0]} (${k2Ranked[0][1]} kali)`]] : []),
+      ...(userRanked[0] ? [[`[i] User paling banyak membebani DB: ${userRanked[0][0]} (total ${userRanked[0][1].total.toFixed(2)} det)`]] : []),
+      [`[i] Lihat sheet "Detail Query" untuk daftar query asli & path lengkap`],
+    ];
+
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    ws['!cols'] = [{ wch: 52 }, { wch: 18 }, { wch: 30 }, { wch: 30 }, { wch: 28 }, { wch: 52 }, { wch: 40 }];
+    return ws;
+  }
+
+  function buildQueryDetailSheet(rows) {
+    const header = ['Waktu', 'User MySQL', 'Schema', 'Query Time (det)', 'Response Time (det)', 'HTTP Status', 'Klasifikasi 1', 'Klasifikasi 2 (Tujuan Query)', 'Path', 'Referer', 'Query Asli'];
+    const data = rows.map((r) => {
+      const { k1, k2 } = classifyQuery(r[fields.query]);
+      return [
+        r[fields.time] ?? '', r[fields.user] ?? '', r[fields.schema] ?? '',
+        number(r[fields.queryTime]), number(r[fields.responseTime]), number(r[fields.status]),
+        k1, k2,
+        r[fields.path] ?? '', r[fields.referer] ?? '', r[fields.query] ?? '',
+      ];
+    });
+    const ws = XLSX.utils.aoa_to_sheet([header, ...data]);
+    ws['!cols'] = [{ wch: 24 }, { wch: 20 }, { wch: 18 }, { wch: 18 }, { wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 52 }, { wch: 40 }, { wch: 42 }, { wch: 80 }];
+    ws['!rows'] = [{ hpt: 24 }];
+    ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: rows.length, c: header.length - 1 } }) };
+    for (let row = 1; row <= rows.length; row++) {
+      for (const col of [3, 4]) { const cell = ws[XLSX.utils.encode_cell({ r: row, c: col })]; if (cell) cell.z = '0.0000'; }
+      for (const col of [5]) { const cell = ws[XLSX.utils.encode_cell({ r: row, c: col })]; if (cell) cell.z = '0'; }
+    }
+    return ws;
+  }
+
+  function exportFilteredExcel() {
+    if (!window.XLSX) return showNotice('Library Excel belum termuat. Periksa koneksi internet lalu muat ulang halaman.');
+    if (!state.displayRows.length) return showNotice('Tidak ada baris hasil filter untuk diunduh.');
+    const columns = [
+      ['Waktu', fields.time, 24], ['User MySQL', fields.user, 22], ['Schema', fields.schema, 20],
+      ['Jumlah', '__count', 12], ['Query Time (detik)', fields.queryTime, 18],
+      ['HTTP Status', fields.status, 14], ['Response Time (detik)', fields.responseTime, 22],
+      ['Path', fields.path, 42], ['Referer', fields.referer, 48],
+      ['Klasifikasi 1', '__k1', 16], ['Klasifikasi 2 (Tujuan Query)', '__k2', 52]
+    ];
+    const values = state.displayRows.map((row) => columns.map(([, field]) => {
+      if (field === '__count') return row.__count || 1;
+      if (field === '__k1') return classifyQuery(row[fields.query]).k1;
+      if (field === '__k2') return classifyQuery(row[fields.query]).k2;
+      if (field === fields.queryTime || field === fields.responseTime || field === fields.status) return number(row[field]);
+      return row[field] ?? '';
+    }));
+    const ws1 = XLSX.utils.aoa_to_sheet([columns.map(([title]) => title), ...values]);
+    ws1['!cols'] = columns.map(([, , wch]) => ({ wch }));
+    ws1['!rows'] = [{ hpt: 24 }];
+    ws1['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: state.displayRows.length, c: columns.length - 1 } }) };
+    for (let row = 1; row <= state.displayRows.length; row++) {
+      for (const col of [4, 6]) { const cell = ws1[XLSX.utils.encode_cell({ r: row, c: col })]; if (cell) cell.z = '0.0000'; }
+      for (const col of [3, 5]) { const cell = ws1[XLSX.utils.encode_cell({ r: row, c: col })]; if (cell) cell.z = '0'; }
+    }
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, ws1, 'Merged Logs');
+    XLSX.utils.book_append_sheet(workbook, buildSummarySheet(state.displayRows), 'Summary Report');
+    XLSX.utils.book_append_sheet(workbook, buildQueryDetailSheet(state.displayRows), 'Detail Query');
+    const date = new Date().toISOString().slice(0, 10);
+    XLSX.writeFile(workbook, `merged-logs-filtered-${date}.xlsx`);
     hideNotice();
   }
   function exportPathExcel(user) {
-    if(!window.XLSX) return showNotice('Library Excel belum termuat. Periksa koneksi internet lalu muat ulang halaman.');
-    const counts=new Map();
-    state.rows.forEach((row)=>{
-      const rowUser=String(row[fields.user]||'(user kosong)');
-      const path=String(row[fields.path]||'').trim();
-      if(rowUser===user&&path) counts.set(path,(counts.get(path)||0)+1);
+    if (!window.XLSX) return showNotice('Library Excel belum termuat. Periksa koneksi internet lalu muat ulang halaman.');
+    const counts = new Map();
+    state.rows.forEach((row) => {
+      const rowUser = String(row[fields.user] || '(user kosong)');
+      const path = String(row[fields.path] || '').trim();
+      if (rowUser === user && path) counts.set(path, (counts.get(path) || 0) + 1);
     });
-    const rows=[...counts.entries()].sort((a,b)=>b[1]-a[1]);
-    if(!rows.length) return showNotice('Tidak ada path untuk user tersebut.');
-    const worksheet=XLSX.utils.aoa_to_sheet([
-      ['User MySQL',user],[],['Path Nginx','Jumlah kemunculan pada slow query'],...rows
+    const rows = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+    if (!rows.length) return showNotice('Tidak ada path untuk user tersebut.');
+    const worksheet = XLSX.utils.aoa_to_sheet([
+      ['User MySQL', user], [], ['Path Nginx', 'Jumlah kemunculan pada slow query'], ...rows
     ]);
-    worksheet['!cols']=[{wch:58},{wch:38}];
-    worksheet['!rows']=[{hpt:22}, {hpt:8}, {hpt:22}];
-    worksheet['!autofilter']={ref:XLSX.utils.encode_range({s:{r:2,c:0},e:{r:rows.length+2,c:1}})};
-    const workbook=XLSX.utils.book_new();XLSX.utils.book_append_sheet(workbook,worksheet,'Path per User');
-    const safeUser=user.replace(/[^a-z0-9_-]+/gi,'-').replace(/^-|-$/g,'')||'user';
-    XLSX.writeFile(workbook,`paths-slow-query-${safeUser}.xlsx`);
+    worksheet['!cols'] = [{ wch: 58 }, { wch: 38 }];
+    worksheet['!rows'] = [{ hpt: 22 }, { hpt: 8 }, { hpt: 22 }];
+    worksheet['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 2, c: 0 }, e: { r: rows.length + 2, c: 1 } }) };
+    const workbook = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(workbook, worksheet, 'Path per User');
+    const safeUser = user.replace(/[^a-z0-9_-]+/gi, '-').replace(/^-|-$/g, '') || 'user';
+    XLSX.writeFile(workbook, `paths-slow-query-${safeUser}.xlsx`);
   }
   function debounce(fn, delay) { let timer; return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), delay); }; }
 })();
