@@ -56,6 +56,7 @@
     const autoFetchBtn = $('auto-fetch-btn');
 
     function setModeBadge(activeMode, isFallback) {
+      if (!badge) return;
       badge.hidden = false;
       badge.className = 'mode-badge ' + (activeMode === 'auto' ? 'mode-auto' : 'mode-manual');
       if (activeMode === 'auto') {
@@ -81,8 +82,8 @@
         await loadWorkbook(file);
         setModeBadge('auto', false);
         // Show refresh button, hide manual upload in intro
-        uploadLabel.hidden = true;
-        autoFetchBtn.hidden = false;
+        if (uploadLabel) uploadLabel.hidden = true;
+        if (autoFetchBtn) autoFetchBtn.hidden = false;
       } catch (err) {
         // Fallback to manual mode
         console.warn('[DataMode] Auto fetch gagal, fallback ke manual:', err.message);
@@ -91,9 +92,11 @@
           `Mode auto: file "${filePath}" tidak dapat diakses (${err.message}). ` +
           'Beralih ke mode manual — silakan upload file Excel secara manual.'
         );
-        uploadLabel.hidden = false;
-        uploadLabel.classList.add('auto-fallback');
-        autoFetchBtn.hidden = true;
+        if (uploadLabel) {
+          uploadLabel.hidden = false;
+          uploadLabel.classList.add('auto-fallback');
+        }
+        if (autoFetchBtn) autoFetchBtn.hidden = true;
       } finally {
         $('loading-overlay').hidden = true;
       }
@@ -103,12 +106,12 @@
       // Trigger auto fetch on load
       fetchAutoFile();
       // Wire refresh button
-      autoFetchBtn.addEventListener('click', fetchAutoFile);
+      if (autoFetchBtn) autoFetchBtn.addEventListener('click', fetchAutoFile);
     } else {
       // Manual mode: normal UI
       setModeBadge('manual', false);
-      uploadLabel.hidden = false;
-      autoFetchBtn.hidden = true;
+      if (uploadLabel) uploadLabel.hidden = false;
+      if (autoFetchBtn) autoFetchBtn.hidden = true;
     }
   })();
 
@@ -466,71 +469,65 @@
     const link = document.createElement('a'); link.href = canvas.toDataURL('image/png'); link.download = `${names[canvasId] || 'grafik'}.png`; link.click();
   }
   // ─── Query Classification ────────────────────────────────────────────────────
+  function cleanQuery(queryText) {
+    if (!queryText) return '';
+    let q = String(queryText)
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/--[^\r\n]*/g, ' ')
+      .replace(/#[^\r\n]*/g, ' ')
+      .trim();
+    let prev;
+    do {
+      prev = q;
+      q = q.replace(/^\s*(?:SET\s+[^;]+;|USE\s+[^;]+;)\s*/i, '').trim();
+    } while (q !== prev);
+    return q;
+  }
+
   function parseMainTable(q) {
-    // Strip leading SET/session statements before the real query
-    const cleaned = q.replace(/^\s*(SET\s+\S+\s*=\s*\S+\s*;?\s*)*/i, '').trim();
-    const fromMatch = cleaned.match(/\bFROM\s+`?(\w+)`?/i);
-    const intoMatch = cleaned.match(/\bINTO\s+`?(\w+)`?/i);
-    const updateMatch = cleaned.match(/^UPDATE\s+`?(\w+)`?/i);
-    const ddlMatch = cleaned.match(/^(?:CREATE|ALTER|DROP|TRUNCATE)\s+(?:TEMPORARY\s+)?(?:TABLE|VIEW)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?`?(\w+)`?/i);
+    const cleaned = cleanQuery(q);
+    const fromMatch = cleaned.match(/\bFROM\s+(?!SELECT\b|\()\s*`?([a-zA-Z0-9_$]+)`?/i)
+      || cleaned.match(/\bFROM\s+`?([a-zA-Z0-9_$]+)`?/i);
+    const intoMatch = cleaned.match(/\bINTO\s+`?([a-zA-Z0-9_$]+)`?/i);
+    const updateMatch = cleaned.match(/\bUPDATE\s+`?([a-zA-Z0-9_$]+)`?/i);
+    const ddlMatch = cleaned.match(/^(?:CREATE|ALTER|DROP|TRUNCATE)\s+(?:TEMPORARY\s+)?(?:TABLE|VIEW)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?`?([a-zA-Z0-9_$]+)`?/i);
     return fromMatch?.[1] || intoMatch?.[1] || updateMatch?.[1] || ddlMatch?.[1] || null;
   }
 
-  function getSelectColumns(q) {
-    const match = q.match(/^SELECT\s+(?:DISTINCT\s+)?([\s\S]*?)(?:\s+FROM\b|$)/i);
-    if (!match) return '*';
-    const columns = match[1].trim();
-    if (columns === '*') return '*';
-
-    const selected = [];
-    let depth = 0, start = 0;
-    for (let i = 0; i < columns.length; i++) {
-      if (columns[i] === '(') depth++;
-      else if (columns[i] === ')') depth--;
-      else if (columns[i] === ',' && depth === 0) {
-        selected.push(columns.slice(start, i).trim());
-        start = i + 1;
-      }
-    }
-    selected.push(columns.slice(start).trim());
-
-    const names = selected.map((column) => {
-      const alias = column.match(/\s+AS\s+`?([\w$]+)`?\s*$/i)?.[1];
-      if (alias) return alias;
-
-      const expression = column.trim();
-      const functionName = expression.match(/^([\w$]+)\s*\(/)?.[1];
-      if (functionName) return `${functionName.toUpperCase()}()`;
-
-      const cleanColumn = expression.replace(/`/g, '').trim();
-      if (/^[\w$]+(?:\.[\w$]+)*$/.test(cleanColumn)) return cleanColumn.split('.').pop();
-
-      return cleanColumn.length > 18 ? `${cleanColumn.slice(0, 15)}...` : cleanColumn;
-    });
-    return `${names.slice(0, 2).join(', ')}${names.length > 2 ? ' ++' : ''}`;
+  function getSelectPurpose(q, qUp) {
+    if (/\bCOUNT\s*\(/i.test(q)) return 'Hitung jumlah data';
+    if (/\b(SUM|AVG|MIN|MAX)\s*\(/i.test(q)) return 'Kalkulasi agregasi data';
+    if (/\b(LIKE|REGEXP|RLIKE|MATCH)\b/i.test(qUp)) return 'Pencarian data';
+    if (/\bLIMIT\s+(?:0\s*,\s*)?1\b/i.test(qUp)) return 'Ambil detail data';
+    if (/\bGROUP\s+BY\b/i.test(qUp)) return 'Rekapitulasi data';
+    if (/\bJOIN\b/i.test(qUp)) return 'Ambil data relasi';
+    if (/\bLIMIT\b/i.test(qUp) || /\bORDER\s+BY\b/i.test(qUp)) return 'Ambil daftar data';
+    if (/\bWHERE\b/i.test(qUp)) return 'Filter data';
+    if (/^SELECT\s+(?:DISTINCT\s+)?\*\s+FROM\b/i.test(qUp)) return 'Ambil seluruh data';
+    return 'Ambil data spesifik';
   }
 
   function classifyQuery(queryText) {
     if (!queryText || String(queryText).trim() === '') return { k1: 'Tidak Diketahui', k2: '-' };
-    const q = String(queryText).replace(/^\s*(SET\s+\S+\s*=\s*[^;]+;\s*)+/i, '').trim();
-    const qUp = q.toUpperCase().replace(/\s+/g, ' ');
-    const table = parseMainTable(q) || 'tabel tidak diketahui';
+    const cleaned = cleanQuery(queryText);
+    const qUp = cleaned.toUpperCase().replace(/\s+/g, ' ');
+    const table = parseMainTable(cleaned) || 'tabel tidak diketahui';
     const tableSuffix = ` '${table}'`;
     const clauses = ['JOIN', 'WHERE', 'LIKE', 'GROUP BY', 'HAVING', 'ORDER BY', 'LIMIT', 'DISTINCT'];
     const tags = clauses.filter((clause) => new RegExp(`\\b${clause.replace(' ', '\\s+')}\\b`).test(qUp));
     const describe = (purpose) => `${purpose}${tags.length ? ` [${tags.join(', ')}]` : ''}${tableSuffix}`;
 
     if (/^SELECT\b/.test(qUp)) {
-      return { k1: 'SELECT', k2: describe(getSelectColumns(q)) };
+      return { k1: 'SELECT', k2: describe(getSelectPurpose(cleaned, qUp)) };
     }
     if (/^INSERT\b/.test(qUp)) {
-      const purpose = /\bON\s+DUPLICATE\s+KEY\b/.test(qUp) ? 'Tambah/perbarui data' : /\bINSERT\s+INTO\b.*\bSELECT\b/is.test(q) ? 'Salin data' : 'Tambah data';
+      const purpose = /\bON\s+DUPLICATE\s+KEY\b/.test(qUp) ? 'Tambah/perbarui data' : /\bINSERT\s+INTO\b.*\bSELECT\b/is.test(cleaned) ? 'Salin data' : 'Tambah data';
       return { k1: 'INSERT', k2: describe(purpose) };
     }
     if (/^UPDATE\b/.test(qUp)) return { k1: 'UPDATE', k2: describe('Perbarui data') };
     if (/^DELETE\b/.test(qUp)) return { k1: 'DELETE', k2: describe('Hapus data') };
     if (/^CALL\b/.test(qUp)) {
-      const procMatch = q.match(/CALL\s+`?(\w+)`?/i);
+      const procMatch = cleaned.match(/CALL\s+`?(\w+)`?/i);
       return { k1: 'CALL', k2: `Jalankan prosedur (${procMatch?.[1] || '?'})` };
     }
     if (/^CREATE\b/.test(qUp)) {
@@ -542,7 +539,178 @@
     if (/^TRUNCATE\b/.test(qUp)) return { k1: 'DDL', k2: describe('Kosongkan data') };
     if (/^(SHOW|DESCRIBE|EXPLAIN)\b/.test(qUp)) return { k1: 'SHOW', k2: 'Tampilkan informasi database' };
     if (/^(SET|COMMIT|ROLLBACK|BEGIN|START\s+TRANSACTION)\b/.test(qUp)) return { k1: 'SESSION', k2: 'Perintah sesi/transaksi' };
-    return { k1: 'Lainnya', k2: `Perintah tidak dikenal${tableSuffix}` };
+    return { k1: 'Lainnya', k2: describe('Perintah lainnya') };
+  }
+
+  // ─── Excel Styling & Export Helpers ──────────────────────────────────────────
+  const EXCEL_STYLES = {
+    title: {
+      fill: { fgColor: { rgb: '1E3A8A' } },
+      font: { name: 'Calibri', sz: 14, bold: true, color: { rgb: 'FFFFFF' } },
+      alignment: { horizontal: 'center', vertical: 'center' }
+    },
+    subtitle: {
+      fill: { fgColor: { rgb: 'F1F5F9' } },
+      font: { name: 'Calibri', sz: 10, italic: true, color: { rgb: '475569' } },
+      alignment: { horizontal: 'center', vertical: 'center' }
+    },
+    section: {
+      fill: { fgColor: { rgb: '1E293B' } },
+      font: { name: 'Calibri', sz: 11, bold: true, color: { rgb: 'FFFFFF' } },
+      alignment: { horizontal: 'left', vertical: 'center', indent: 1 }
+    },
+    th: {
+      fill: { fgColor: { rgb: '2563EB' } },
+      font: { name: 'Calibri', sz: 10, bold: true, color: { rgb: 'FFFFFF' } },
+      alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+      border: {
+        top: { style: 'thin', color: { rgb: '1D4ED8' } },
+        bottom: { style: 'medium', color: { rgb: '1E40AF' } },
+        left: { style: 'thin', color: { rgb: '3B82F6' } },
+        right: { style: 'thin', color: { rgb: '3B82F6' } }
+      }
+    },
+    thDark: {
+      fill: { fgColor: { rgb: '1E293B' } },
+      font: { name: 'Calibri', sz: 10, bold: true, color: { rgb: 'FFFFFF' } },
+      alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+      border: {
+        top: { style: 'thin', color: { rgb: '0F172A' } },
+        bottom: { style: 'medium', color: { rgb: '0F172A' } },
+        left: { style: 'thin', color: { rgb: '334155' } },
+        right: { style: 'thin', color: { rgb: '334155' } }
+      }
+    },
+    thPlain: {
+      font: { name: 'Calibri', sz: 10, bold: true, color: { rgb: '000000' } },
+      alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+      border: {
+        top: { style: 'thin', color: { rgb: 'CBD5E1' } },
+        bottom: { style: 'medium', color: { rgb: '94A3B8' } },
+        left: { style: 'thin', color: { rgb: 'CBD5E1' } },
+        right: { style: 'thin', color: { rgb: 'CBD5E1' } }
+      }
+    },
+    cellLeft: {
+      font: { name: 'Calibri', sz: 10, color: { rgb: '1E293B' } },
+      alignment: { horizontal: 'left', vertical: 'center' },
+      border: {
+        top: { style: 'thin', color: { rgb: 'E2E8F0' } },
+        bottom: { style: 'thin', color: { rgb: 'E2E8F0' } },
+        left: { style: 'thin', color: { rgb: 'E2E8F0' } },
+        right: { style: 'thin', color: { rgb: 'E2E8F0' } }
+      }
+    },
+    cellRight: {
+      font: { name: 'Calibri', sz: 10, color: { rgb: '1E293B' } },
+      alignment: { horizontal: 'right', vertical: 'center' },
+      border: {
+        top: { style: 'thin', color: { rgb: 'E2E8F0' } },
+        bottom: { style: 'thin', color: { rgb: 'E2E8F0' } },
+        left: { style: 'thin', color: { rgb: 'E2E8F0' } },
+        right: { style: 'thin', color: { rgb: 'E2E8F0' } }
+      }
+    },
+    cellCenter: {
+      font: { name: 'Calibri', sz: 10, color: { rgb: '1E293B' } },
+      alignment: { horizontal: 'center', vertical: 'center' },
+      border: {
+        top: { style: 'thin', color: { rgb: 'E2E8F0' } },
+        bottom: { style: 'thin', color: { rgb: 'E2E8F0' } },
+        left: { style: 'thin', color: { rgb: 'E2E8F0' } },
+        right: { style: 'thin', color: { rgb: 'E2E8F0' } }
+      }
+    },
+    badgeNormal: {
+      fill: { fgColor: { rgb: 'DCFCE7' } },
+      font: { name: 'Calibri', sz: 10, bold: true, color: { rgb: '166534' } },
+      alignment: { horizontal: 'center', vertical: 'center' },
+      border: {
+        top: { style: 'thin', color: { rgb: 'BBF7D0' } },
+        bottom: { style: 'thin', color: { rgb: 'BBF7D0' } },
+        left: { style: 'thin', color: { rgb: 'BBF7D0' } },
+        right: { style: 'thin', color: { rgb: 'BBF7D0' } }
+      }
+    },
+    badgeSlow: {
+      fill: { fgColor: { rgb: 'FEF3C7' } },
+      font: { name: 'Calibri', sz: 10, bold: true, color: { rgb: '92400E' } },
+      alignment: { horizontal: 'center', vertical: 'center' },
+      border: {
+        top: { style: 'thin', color: { rgb: 'FDE68A' } },
+        bottom: { style: 'thin', color: { rgb: 'FDE68A' } },
+        left: { style: 'thin', color: { rgb: 'FDE68A' } },
+        right: { style: 'thin', color: { rgb: 'FDE68A' } }
+      }
+    },
+    badgeVerySlow: {
+      fill: { fgColor: { rgb: 'FEE2E2' } },
+      font: { name: 'Calibri', sz: 10, bold: true, color: { rgb: '991B1B' } },
+      alignment: { horizontal: 'center', vertical: 'center' },
+      border: {
+        top: { style: 'thin', color: { rgb: 'FECACA' } },
+        bottom: { style: 'thin', color: { rgb: 'FECACA' } },
+        left: { style: 'thin', color: { rgb: 'FECACA' } },
+        right: { style: 'thin', color: { rgb: 'FECACA' } }
+      }
+    },
+    recWarn: {
+      fill: { fgColor: { rgb: 'FEF2F2' } },
+      font: { name: 'Calibri', sz: 10, bold: true, color: { rgb: '991B1B' } },
+      alignment: { horizontal: 'left', vertical: 'center' },
+      border: {
+        top: { style: 'thin', color: { rgb: 'FCA5A5' } },
+        bottom: { style: 'thin', color: { rgb: 'FCA5A5' } },
+        left: { style: 'medium', color: { rgb: 'DC2626' } },
+        right: { style: 'thin', color: { rgb: 'FCA5A5' } }
+      }
+    },
+    recInfo: {
+      fill: { fgColor: { rgb: 'EFF6FF' } },
+      font: { name: 'Calibri', sz: 10, color: { rgb: '1E40AF' } },
+      alignment: { horizontal: 'left', vertical: 'center' },
+      border: {
+        top: { style: 'thin', color: { rgb: 'BFDBFE' } },
+        bottom: { style: 'thin', color: { rgb: 'BFDBFE' } },
+        left: { style: 'medium', color: { rgb: '2563EB' } },
+        right: { style: 'thin', color: { rgb: 'BFDBFE' } }
+      }
+    }
+  };
+
+  function writeCell(ws, r, c, val, baseStyle, isEvenRow, numFmt) {
+    const ref = XLSX.utils.encode_cell({ r, c });
+    const cell = { v: val ?? '' };
+    if (typeof val === 'number') {
+      cell.t = 'n';
+      if (numFmt) cell.z = numFmt;
+    } else if (typeof val === 'boolean') {
+      cell.t = 'b';
+    } else {
+      cell.t = 's';
+      cell.v = String(val ?? '');
+    }
+    let s = baseStyle ? { ...baseStyle } : {};
+    if (isEvenRow && !s.fill) {
+      s.fill = { fgColor: { rgb: 'F8FAFC' } };
+    }
+    cell.s = s;
+    ws[ref] = cell;
+    return cell;
+  }
+
+  function addMerge(ws, sR, sC, eR, eC, style) {
+    if (!ws['!merges']) ws['!merges'] = [];
+    ws['!merges'].push({ s: { r: sR, c: sC }, e: { r: eR, c: eC } });
+    if (style) {
+      for (let r = sR; r <= eR; r++) {
+        for (let c = sC; c <= eC; c++) {
+          const ref = XLSX.utils.encode_cell({ r, c });
+          if (!ws[ref]) ws[ref] = { t: 's', v: '' };
+          ws[ref].s = { ...(ws[ref].s || {}), ...style };
+        }
+      }
+    }
   }
 
   // ─── Analysis & Export ────────────────────────────────────────────────────────
@@ -552,7 +720,7 @@
     const statuses = rows.map((r) => number(r[fields.status])).filter((v) => v != null);
     const avg = (arr) => arr.length ? arr.reduce((s, v) => s + v, 0) / arr.length : null;
     const pct = (n, d) => d ? `${(n / d * 100).toFixed(1)}%` : '0%';
-    const f4 = (v) => v != null ? Number(v.toFixed(4)) : '-';
+    const f4 = (v) => v != null ? Number(v.toFixed(4)) : null;
 
     const total = rows.length;
     const errors = statuses.filter((s) => s >= 400).length;
@@ -612,105 +780,238 @@
       .sort((a, b) => (number(b[fields.queryTime]) || 0) - (number(a[fields.queryTime]) || 0)).slice(0, 5)
       .map((r) => {
         const { k1, k2 } = classifyQuery(r[fields.query]);
-        return [String(r[fields.time] || '-'), String(r[fields.user] || '-'), String(r[fields.schema] || '-'),
-        f4(number(r[fields.queryTime])), k1, k2, String(r[fields.path] || '-')];
+        return [
+          String(r[fields.time] || '-'), String(r[fields.user] || '-'), String(r[fields.schema] || '-'),
+          f4(number(r[fields.queryTime])), k1, k2, String(r[fields.path] || '-')
+        ];
       });
 
-    const nl = [[]], H = (t) => [t];
+    const ws = {};
+    const rowHeights = [];
+    let curRow = 0;
     const ts = new Date().toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' });
 
-    const data = [
-      ['SUMMARY REPORT — SLOW QUERY LOG ANALYZER'],
-      [`Dibuat: ${ts}   |   Total data: ${total.toLocaleString('id-ID')} baris`],
-      nl[0],
-      // ── 1. KPI ──
-      ['━━━ RINGKASAN KINERJA ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
-      ['Metrik', 'Nilai', 'Satuan'],
-      ['Total Log Dianalisa', total, 'baris'],
-      ['Query Time — Rata-rata', f4(avgQt), 'detik'],
-      ['Query Time — Tercepat', f4(minQt), 'detik'],
-      ['Query Time — Terlama', f4(maxQt), 'detik'],
-      ['Response Time — Rata-rata', f4(avgRt), 'detik'],
-      ['Response Time — Tertinggi', f4(maxRt), 'detik'],
-      ['Total HTTP Error (4xx+5xx)', errors, `${pct(errors, statuses.length)} dari seluruh request`],
-      nl[0],
-      // ── 2. Kecepatan Query ──
-      ['━━━ DISTRIBUSI KECEPATAN QUERY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
-      ['Kategori', 'Jumlah', 'Persentase', 'Threshold'],
-      ['Normal', normal, pct(normal, total), '< 1 detik'],
-      ['Lambat', slow, pct(slow, total), '1 – 5 detik'],
-      ['Sangat Lambat', verySlow, pct(verySlow, total), '>= 5 detik'],
-      nl[0],
-      // ── 3. Klasifikasi 1 ──
-      ['━━━ DISTRIBUSI TIPE QUERY (KLASIFIKASI 1) ━━━━━━━━━━━━━━━━━━━━━━━'],
-      ['Tipe Query', 'Jumlah', 'Persentase'],
-      ...k1Ranked.map(([k, n]) => [k, n, pct(n, total)]),
-      nl[0],
-      // ── 4. Klasifikasi 2 (top 15) ──
-      ['━━━ TOP 15 TUJUAN QUERY (KLASIFIKASI 2) ━━━━━━━━━━━━━━━━━━━━━━━━━'],
-      ['Deskripsi Tujuan Query', 'Jumlah', 'Persentase'],
-      ...k2Ranked.map(([k, n]) => [k, n, pct(n, total)]),
-      nl[0],
-      // ── 5. Top User ──
-      ['━━━ TOP 10 USER — TOTAL QUERY TIME ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
-      ['User MySQL', 'Jumlah Log', 'Total Qt (det)', 'Rata-rata Qt (det)', 'Maks Qt (det)'],
-      ...userRanked.map(([u, d]) => [u, d.count, f4(d.total), f4(d.count ? d.total / d.count : 0), f4(d.max)]),
-      nl[0],
-      // ── 6. Top Schema ──
-      ['━━━ TOP 10 SCHEMA — RATA-RATA QUERY TIME ━━━━━━━━━━━━━━━━━━━━━━━━'],
-      ['Schema', 'Jumlah Log', 'Total Qt (det)', 'Rata-rata Qt (det)', 'Maks Qt (det)'],
-      ...schRanked.map(([s, d]) => [s, d.count, f4(d.total), f4(d.count ? d.total / d.count : 0), f4(d.max)]),
-      nl[0],
-      // ── 7. HTTP Status ──
-      ['━━━ DISTRIBUSI HTTP STATUS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
-      ['HTTP Status', 'Jumlah', 'Persentase', 'Kategori'],
+    // Title banner
+    writeCell(ws, curRow, 0, 'SLOW QUERY & ACCESS LOG ANALYZER — EXECUTIVE SUMMARY', EXCEL_STYLES.title, false);
+    addMerge(ws, curRow, 0, curRow, 6, EXCEL_STYLES.title);
+    rowHeights[curRow] = { hpt: 30 };
+    curRow++;
+
+    // Subtitle banner
+    writeCell(ws, curRow, 0, `Dibuat: ${ts} WIB   |   Total Data Dianalisa: ${total.toLocaleString('id-ID')} baris`, EXCEL_STYLES.subtitle, false);
+    addMerge(ws, curRow, 0, curRow, 6, EXCEL_STYLES.subtitle);
+    rowHeights[curRow] = { hpt: 20 };
+    curRow++;
+
+    // Spacer
+    rowHeights[curRow] = { hpt: 12 };
+    curRow++;
+
+    function renderSection(title, headers, rowsData, alignments, numFormats, badgeColIdx, badgeStyles) {
+      writeCell(ws, curRow, 0, title, EXCEL_STYLES.section, false);
+      addMerge(ws, curRow, 0, curRow, headers.length - 1, EXCEL_STYLES.section);
+      rowHeights[curRow] = { hpt: 24 };
+      curRow++;
+
+      headers.forEach((h, c) => {
+        writeCell(ws, curRow, c, h, EXCEL_STYLES.th, false);
+      });
+      rowHeights[curRow] = { hpt: 22 };
+      curRow++;
+
+      rowsData.forEach((row, rIdx) => {
+        const isEven = rIdx % 2 === 1;
+        rowHeights[curRow] = { hpt: 20 };
+        row.forEach((val, c) => {
+          let style = alignments?.[c] === 'right' ? EXCEL_STYLES.cellRight
+            : alignments?.[c] === 'center' ? EXCEL_STYLES.cellCenter
+              : EXCEL_STYLES.cellLeft;
+          if (badgeColIdx === c && badgeStyles?.[rIdx]) {
+            style = badgeStyles[rIdx];
+          }
+          const numFmt = numFormats?.[c];
+          writeCell(ws, curRow, c, val, style, isEven, numFmt);
+        });
+        curRow++;
+      });
+
+      rowHeights[curRow] = { hpt: 12 };
+      curRow++;
+    }
+
+    // 1. KPI
+    renderSection(
+      '1. RINGKASAN KINERJA SISTEM (KPI)',
+      ['Indikator Metrik', 'Nilai', 'Satuan / Keterangan'],
+      [
+        ['Total Log Dianalisa', total, 'baris log'],
+        ['Query Time — Rata-rata', avgQt, 'detik (MySQL)'],
+        ['Query Time — Tercepat (Min)', minQt, 'detik (MySQL)'],
+        ['Query Time — Terlama (Max)', maxQt, 'detik (MySQL)'],
+        ['Response Time — Rata-rata', avgRt, 'detik (Nginx)'],
+        ['Response Time — Tertinggi (Max)', maxRt, 'detik (Nginx)'],
+        ['Total HTTP Error (4xx & 5xx)', errors, `${pct(errors, statuses.length)} dari total request`],
+        ['HTTP Sukses (2xx)', statuses.filter((s) => s >= 200 && s < 300).length, `${pct(statuses.filter((s) => s >= 200 && s < 300).length, statuses.length)} dari total request`]
+      ],
+      ['left', 'right', 'left'],
+      [null, '0.0000', null]
+    );
+
+    // 2. Kecepatan Query
+    renderSection(
+      '2. DISTRIBUSI KECEPATAN QUERY MYSQL',
+      ['Kategori Kecepatan', 'Kriteria Ambang Batas', 'Jumlah Log', 'Persentase'],
+      [
+        ['Normal', '< 1 detik', normal, pct(normal, total)],
+        ['Lambat', '1 – 5 detik', slow, pct(slow, total)],
+        ['Sangat Lambat', '>= 5 detik', verySlow, pct(verySlow, total)]
+      ],
+      ['center', 'center', 'right', 'right'],
+      [null, null, '#,##0', null],
+      0,
+      [EXCEL_STYLES.badgeNormal, EXCEL_STYLES.badgeSlow, EXCEL_STYLES.badgeVerySlow]
+    );
+
+    // 3. Klasifikasi 1
+    renderSection(
+      '3. DISTRIBUSI TIPE QUERY (KLASIFIKASI 1)',
+      ['Tipe Query (SQL)', 'Jumlah Log', 'Persentase'],
+      k1Ranked.map(([k, n]) => [k, n, pct(n, total)]),
+      ['left', 'right', 'right'],
+      [null, '#,##0', null]
+    );
+
+    // 4. Klasifikasi 2
+    renderSection(
+      '4. TOP 15 TUJUAN & PENGELOMPOKAN QUERY (KLASIFIKASI 2)',
+      ['Pengelompokan & Tujuan Query', 'Jumlah Log', 'Persentase'],
+      k2Ranked.map(([k, n]) => [k, n, pct(n, total)]),
+      ['left', 'right', 'right'],
+      [null, '#,##0', null]
+    );
+
+    // 5. Top 10 User
+    renderSection(
+      '5. TOP 10 USER MYSQL — TOTAL QUERY TIME',
+      ['User MySQL', 'Jumlah Log', 'Total Qt (detik)', 'Rata-rata Qt (detik)', 'Maks Qt (detik)'],
+      userRanked.map(([u, d]) => [u, d.count, f4(d.total), f4(d.count ? d.total / d.count : 0), f4(d.max)]),
+      ['left', 'right', 'right', 'right', 'right'],
+      [null, '#,##0', '0.0000', '0.0000', '0.0000']
+    );
+
+    // 6. Top 10 Schema
+    renderSection(
+      '6. TOP 10 SCHEMA DATABASE — RATA-RATA QUERY TIME',
+      ['Schema Database', 'Jumlah Log', 'Total Qt (detik)', 'Rata-rata Qt (detik)', 'Maks Qt (detik)'],
+      schRanked.map(([s, d]) => [s, d.count, f4(d.total), f4(d.count ? d.total / d.count : 0), f4(d.max)]),
+      ['left', 'right', 'right', 'right', 'right'],
+      [null, '#,##0', '0.0000', '0.0000', '0.0000']
+    );
+
+    // 7. HTTP Status
+    const statusRows = [
       ...stRanked.map(([s, n]) => {
         const c = Number(s);
         const cat = c >= 500 ? 'Server Error (5xx)' : c >= 400 ? 'Client Error (4xx)' : c >= 300 ? 'Redirect (3xx)' : 'Sukses (2xx)';
-        return [s, n, pct(n, statuses.length), cat];
+        return [s, cat, n, pct(n, statuses.length)];
       }),
-      ['— Client Error (4xx)', clientErr, pct(clientErr, statuses.length), ''],
-      ['— Server Error (5xx)', serverErr, pct(serverErr, statuses.length), ''],
-      nl[0],
-      // ── 8. Top 5 Lambat ──
-      ['━━━ 5 QUERY PALING LAMBAT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
-      ['Waktu', 'User MySQL', 'Schema', 'Qt (det)', 'Klasif. 1', 'Klasif. 2 (Tujuan)', 'Path'],
-      ...top5,
-      nl[0],
-      // ── 9. Rekomendasi ──
-      ['━━━ REKOMENDASI OTOMATIS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'],
-      ...(verySlow > 0 ? [[`[!] ${verySlow} query >= 5 detik — evaluasi indeks & struktur query`]] : []),
-      ...(errors > 0 ? [[`[!] ${errors} HTTP error — periksa log aplikasi & server`]] : []),
-      ...(k1Ranked[0] ? [[`[i] Tipe query dominan: ${k1Ranked[0][0]} (${k1Ranked[0][1]} kali — ${pct(k1Ranked[0][1], total)})`]] : []),
-      ...(k2Ranked[0] ? [[`[i] Tujuan query terbanyak: ${k2Ranked[0][0]} (${k2Ranked[0][1]} kali)`]] : []),
-      ...(userRanked[0] ? [[`[i] User paling banyak membebani DB: ${userRanked[0][0]} (total ${userRanked[0][1].total.toFixed(2)} det)`]] : []),
-      [`[i] Lihat sheet "Detail Query" untuk daftar query asli & path lengkap`],
+      ['4xx Total', 'Subtotal Client Error', clientErr, pct(clientErr, statuses.length)],
+      ['5xx Total', 'Subtotal Server Error', serverErr, pct(serverErr, statuses.length)]
+    ];
+    renderSection(
+      '7. DISTRIBUSI STATUS HTTP (NGINX)',
+      ['HTTP Status', 'Kategori Respons', 'Jumlah Request', 'Persentase'],
+      statusRows,
+      ['center', 'left', 'right', 'right'],
+      [null, null, '#,##0', null]
+    );
+
+    // 8. Top 5 Slowest
+    renderSection(
+      '8. 5 QUERY PALING LAMBAT (TOP BOTTLENECK)',
+      ['Waktu Eksekusi', 'User MySQL', 'Schema', 'Query Time (det)', 'Tipe (K1)', 'Tujuan Query (K2)', 'Path Nginx'],
+      top5,
+      ['center', 'left', 'left', 'right', 'center', 'left', 'left'],
+      [null, null, null, '0.0000', null, null, null]
+    );
+
+    // 9. Rekomendasi
+    writeCell(ws, curRow, 0, '9. REKOMENDASI DAN TINDAK LANJUT', EXCEL_STYLES.section, false);
+    addMerge(ws, curRow, 0, curRow, 6, EXCEL_STYLES.section);
+    rowHeights[curRow] = { hpt: 24 };
+    curRow++;
+
+    const recs = [];
+    if (verySlow > 0) {
+      recs.push({ text: `[!] PERHATIAN: Ditemukan ${verySlow} query dengan durasi >= 5 detik. Prioritaskan optimasi query dan evaluasi pembuatan indeks komposit pada tabel terkait.`, warn: true });
+    }
+    if (errors > 0) {
+      recs.push({ text: `[!] PERHATIAN: Terjadi ${errors} HTTP error (${pct(errors, statuses.length)}). Periksa korelasi waktu query lambat terhadap timeout atau crash server Nginx/PHP.`, warn: true });
+    }
+    if (k1Ranked[0]) {
+      recs.push({ text: `[i] Operasi SQL dominan adalah ${k1Ranked[0][0]} (${k1Ranked[0][1]} log — ${pct(k1Ranked[0][1], total)}). Pastikan pola caching diterapkan untuk mengurangi beban pembacaan berulang.`, warn: false });
+    }
+    if (k2Ranked[0]) {
+      recs.push({ text: `[i] Tujuan query terbanyak: ${k2Ranked[0][0]} (${k2Ranked[0][1]} log).`, warn: false });
+    }
+    if (userRanked[0]) {
+      recs.push({ text: `[i] User database paling membebani: ${userRanked[0][0]} (total akumulasi query time: ${userRanked[0][1].total.toFixed(2)} detik).`, warn: false });
+    }
+    recs.push({ text: `[i] Lihat sheet "Detail Query" untuk melihat daftar lengkap waktu, path, referer, dan original_query.`, warn: false });
+
+    recs.forEach((rec) => {
+      rowHeights[curRow] = { hpt: 22 };
+      const st = rec.warn ? EXCEL_STYLES.recWarn : EXCEL_STYLES.recInfo;
+      writeCell(ws, curRow, 0, rec.text, st, false);
+      addMerge(ws, curRow, 0, curRow, 6, st);
+      curRow++;
+    });
+
+    ws['!rows'] = rowHeights;
+    ws['!cols'] = [
+      { wch: 48 },
+      { wch: 22 },
+      { wch: 28 },
+      { wch: 22 },
+      { wch: 20 },
+      { wch: 55 },
+      { wch: 42 }
     ];
 
-    const ws = XLSX.utils.aoa_to_sheet(data);
-    ws['!cols'] = [{ wch: 52 }, { wch: 18 }, { wch: 30 }, { wch: 30 }, { wch: 28 }, { wch: 52 }, { wch: 40 }];
+    const range = { s: { r: 0, c: 0 }, e: { r: curRow - 1, c: 6 } };
+    ws['!ref'] = XLSX.utils.encode_range(range);
     return ws;
   }
 
   function buildQueryDetailSheet(rows) {
-    const header = ['Waktu', 'User MySQL', 'Schema', 'Query Time (det)', 'Response Time (det)', 'HTTP Status', 'Klasifikasi 1', 'Klasifikasi 2 (Tujuan Query)', 'Path', 'Referer', 'Query Asli'];
-    const data = rows.map((r) => {
-      const { k1, k2 } = classifyQuery(r[fields.query]);
-      return [
-        r[fields.time] ?? '', r[fields.user] ?? '', r[fields.schema] ?? '',
-        number(r[fields.queryTime]), number(r[fields.responseTime]), number(r[fields.status]),
-        k1, k2,
-        r[fields.path] ?? '', r[fields.referer] ?? '', r[fields.query] ?? '',
-      ];
+    const ws = {};
+    const headers = ['waktu', 'path', 'referer', 'original_query'];
+    ws['!cols'] = [{ wch: 26 }, { wch: 45 }, { wch: 45 }, { wch: 95 }];
+    const rowHeights = [{ hpt: 26 }];
+
+    // 1. Header row (tanpa warna / no fill)
+    headers.forEach((h, c) => {
+      writeCell(ws, 0, c, h, EXCEL_STYLES.thPlain, false);
     });
-    const ws = XLSX.utils.aoa_to_sheet([header, ...data]);
-    ws['!cols'] = [{ wch: 24 }, { wch: 20 }, { wch: 18 }, { wch: 18 }, { wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 52 }, { wch: 40 }, { wch: 42 }, { wch: 80 }];
-    ws['!rows'] = [{ hpt: 24 }];
-    ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: rows.length, c: header.length - 1 } }) };
-    for (let row = 1; row <= rows.length; row++) {
-      for (const col of [3, 4]) { const cell = ws[XLSX.utils.encode_cell({ r: row, c: col })]; if (cell) cell.z = '0.0000'; }
-      for (const col of [5]) { const cell = ws[XLSX.utils.encode_cell({ r: row, c: col })]; if (cell) cell.z = '0'; }
-    }
+
+    // 2. Data rows
+    rows.forEach((r, idx) => {
+      const rowIdx = idx + 1;
+      rowHeights[rowIdx] = { hpt: 20 };
+
+      writeCell(ws, rowIdx, 0, r[fields.time] ?? '', EXCEL_STYLES.cellCenter, false);
+      writeCell(ws, rowIdx, 1, r[fields.path] ?? '', EXCEL_STYLES.cellLeft, false);
+      writeCell(ws, rowIdx, 2, r[fields.referer] ?? '', EXCEL_STYLES.cellLeft, false);
+      writeCell(ws, rowIdx, 3, r[fields.query] ?? '', {
+        ...EXCEL_STYLES.cellLeft,
+        alignment: { horizontal: 'left', vertical: 'center', wrapText: true }
+      }, false);
+    });
+
+    ws['!rows'] = rowHeights;
+    const range = { s: { r: 0, c: 0 }, e: { r: rows.length, c: headers.length - 1 } };
+    ws['!ref'] = XLSX.utils.encode_range(range);
+    ws['!autofilter'] = { ref: ws['!ref'] };
     return ws;
   }
 
@@ -722,23 +1023,59 @@
       ['Jumlah', '__count', 12], ['Query Time (detik)', fields.queryTime, 18],
       ['HTTP Status', fields.status, 14], ['Response Time (detik)', fields.responseTime, 22],
       ['Path', fields.path, 42], ['Referer', fields.referer, 48],
-      ['Klasifikasi 1', '__k1', 16], ['Klasifikasi 2 (Tujuan Query)', '__k2', 52]
+      ['Klasifikasi 1', '__k1', 16], ['Klasifikasi 2 ', '__k2', 52]
     ];
-    const values = state.displayRows.map((row) => columns.map(([, field]) => {
-      if (field === '__count') return row.__count || 1;
-      if (field === '__k1') return classifyQuery(row[fields.query]).k1;
-      if (field === '__k2') return classifyQuery(row[fields.query]).k2;
-      if (field === fields.queryTime || field === fields.responseTime || field === fields.status) return number(row[field]);
-      return row[field] ?? '';
-    }));
-    const ws1 = XLSX.utils.aoa_to_sheet([columns.map(([title]) => title), ...values]);
+    const ws1 = {};
     ws1['!cols'] = columns.map(([, , wch]) => ({ wch }));
-    ws1['!rows'] = [{ hpt: 24 }];
-    ws1['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: state.displayRows.length, c: columns.length - 1 } }) };
-    for (let row = 1; row <= state.displayRows.length; row++) {
-      for (const col of [4, 6]) { const cell = ws1[XLSX.utils.encode_cell({ r: row, c: col })]; if (cell) cell.z = '0.0000'; }
-      for (const col of [3, 5]) { const cell = ws1[XLSX.utils.encode_cell({ r: row, c: col })]; if (cell) cell.z = '0'; }
-    }
+    const rowHeights = [{ hpt: 24 }];
+
+    columns.forEach(([title], c) => {
+      writeCell(ws1, 0, c, title, EXCEL_STYLES.thPlain, false);
+    });
+
+    state.displayRows.forEach((row, idx) => {
+      const rowIdx = idx + 1;
+      rowHeights[rowIdx] = { hpt: 20 };
+
+      columns.forEach(([, field], c) => {
+        let val;
+        let numFmt = null;
+        let align = EXCEL_STYLES.cellLeft;
+
+        if (field === '__count') {
+          val = row.__count || 1;
+          numFmt = '#,##0';
+          align = EXCEL_STYLES.cellRight;
+        } else if (field === '__k1') {
+          val = classifyQuery(row[fields.query]).k1;
+          align = EXCEL_STYLES.cellCenter;
+        } else if (field === '__k2') {
+          val = classifyQuery(row[fields.query]).k2;
+          align = EXCEL_STYLES.cellLeft;
+        } else if (field === fields.queryTime || field === fields.responseTime) {
+          val = number(row[field]);
+          numFmt = '0.0000';
+          align = EXCEL_STYLES.cellRight;
+        } else if (field === fields.status) {
+          val = number(row[field]);
+          numFmt = '0';
+          align = EXCEL_STYLES.cellCenter;
+        } else if (field === fields.time) {
+          val = row[field] ?? '';
+          align = EXCEL_STYLES.cellCenter;
+        } else {
+          val = row[field] ?? '';
+          align = EXCEL_STYLES.cellLeft;
+        }
+
+        writeCell(ws1, rowIdx, c, val, align, false, numFmt);
+      });
+    });
+
+    ws1['!rows'] = rowHeights;
+    ws1['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: state.displayRows.length, c: columns.length - 1 } });
+    ws1['!autofilter'] = { ref: ws1['!ref'] };
+
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, ws1, 'Merged Logs');
     XLSX.utils.book_append_sheet(workbook, buildSummarySheet(state.displayRows), 'Summary Report');
@@ -757,13 +1094,31 @@
     });
     const rows = [...counts.entries()].sort((a, b) => b[1] - a[1]);
     if (!rows.length) return showNotice('Tidak ada path untuk user tersebut.');
-    const worksheet = XLSX.utils.aoa_to_sheet([
-      ['User MySQL', user], [], ['Path Nginx', 'Jumlah kemunculan pada slow query'], ...rows
-    ]);
-    worksheet['!cols'] = [{ wch: 58 }, { wch: 38 }];
-    worksheet['!rows'] = [{ hpt: 22 }, { hpt: 8 }, { hpt: 22 }];
-    worksheet['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 2, c: 0 }, e: { r: rows.length + 2, c: 1 } }) };
-    const workbook = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(workbook, worksheet, 'Path per User');
+
+    const ws = {};
+    ws['!cols'] = [{ wch: 58 }, { wch: 38 }];
+    const rowHeights = [{ hpt: 24 }, { hpt: 12 }, { hpt: 22 }];
+
+    writeCell(ws, 0, 0, 'User MySQL', EXCEL_STYLES.thDark, false);
+    writeCell(ws, 0, 1, user, EXCEL_STYLES.cellLeft, false);
+
+    writeCell(ws, 2, 0, 'Path Nginx', EXCEL_STYLES.th, false);
+    writeCell(ws, 2, 1, 'Jumlah kemunculan pada slow query', EXCEL_STYLES.th, false);
+
+    rows.forEach(([path, count], idx) => {
+      const rowIdx = idx + 3;
+      const isEven = idx % 2 === 1;
+      rowHeights[rowIdx] = { hpt: 20 };
+      writeCell(ws, rowIdx, 0, path, EXCEL_STYLES.cellLeft, isEven);
+      writeCell(ws, rowIdx, 1, count, EXCEL_STYLES.cellRight, isEven, '#,##0');
+    });
+
+    ws['!rows'] = rowHeights;
+    ws['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: rows.length + 2, c: 1 } });
+    ws['!autofilter'] = { ref: XLSX.utils.encode_range({ s: { r: 2, c: 0 }, e: { r: rows.length + 2, c: 1 } }) };
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, ws, 'Path per User');
     const safeUser = user.replace(/[^a-z0-9_-]+/gi, '-').replace(/^-|-$/g, '') || 'user';
     XLSX.writeFile(workbook, `paths-slow-query-${safeUser}.xlsx`);
   }
