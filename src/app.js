@@ -472,95 +472,77 @@
     const fromMatch = cleaned.match(/\bFROM\s+`?(\w+)`?/i);
     const intoMatch = cleaned.match(/\bINTO\s+`?(\w+)`?/i);
     const updateMatch = cleaned.match(/^UPDATE\s+`?(\w+)`?/i);
-    return fromMatch?.[1] || intoMatch?.[1] || updateMatch?.[1] || null;
+    const ddlMatch = cleaned.match(/^(?:CREATE|ALTER|DROP|TRUNCATE)\s+(?:TEMPORARY\s+)?(?:TABLE|VIEW)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?`?(\w+)`?/i);
+    return fromMatch?.[1] || intoMatch?.[1] || updateMatch?.[1] || ddlMatch?.[1] || null;
   }
 
   function getSelectColumns(q) {
-    const m = q.match(/^SELECT\s+(.*?)\s+FROM\b/is);
-    if (!m) return null;
-    const cols = m[1].trim();
-    if (cols === '*') return 'semua kolom (*)';
-    if (cols.toUpperCase().startsWith('COUNT(')) return 'jumlah baris (COUNT)';
-    if (cols.toUpperCase().startsWith('SUM(')) return 'total nilai (SUM)';
-    if (cols.toUpperCase().startsWith('AVG(')) return 'rata-rata (AVG)';
-    if (cols.toUpperCase().startsWith('MAX(') || cols.toUpperCase().startsWith('MIN(')) return 'nilai maks/min';
-    const list = cols.split(',').map(c => c.trim().replace(/`/g, '').split('.').pop());
-    if (list.length <= 3) return `kolom: ${list.join(', ')}`;
-    return `${list.length} kolom spesifik`;
+    const match = q.match(/^SELECT\s+(?:DISTINCT\s+)?([\s\S]*?)(?:\s+FROM\b|$)/i);
+    if (!match) return '*';
+    const columns = match[1].trim();
+    if (columns === '*') return '*';
+
+    const selected = [];
+    let depth = 0, start = 0;
+    for (let i = 0; i < columns.length; i++) {
+      if (columns[i] === '(') depth++;
+      else if (columns[i] === ')') depth--;
+      else if (columns[i] === ',' && depth === 0) {
+        selected.push(columns.slice(start, i).trim());
+        start = i + 1;
+      }
+    }
+    selected.push(columns.slice(start).trim());
+
+    const names = selected.map((column) => {
+      const alias = column.match(/\s+AS\s+`?([\w$]+)`?\s*$/i)?.[1];
+      if (alias) return alias;
+
+      const expression = column.trim();
+      const functionName = expression.match(/^([\w$]+)\s*\(/)?.[1];
+      if (functionName) return `${functionName.toUpperCase()}()`;
+
+      const cleanColumn = expression.replace(/`/g, '').trim();
+      if (/^[\w$]+(?:\.[\w$]+)*$/.test(cleanColumn)) return cleanColumn.split('.').pop();
+
+      return cleanColumn.length > 18 ? `${cleanColumn.slice(0, 15)}...` : cleanColumn;
+    });
+    return `${names.slice(0, 2).join(', ')}${names.length > 2 ? ' ++' : ''}`;
   }
 
   function classifyQuery(queryText) {
     if (!queryText || String(queryText).trim() === '') return { k1: 'Tidak Diketahui', k2: '-' };
-    // Strip SET timestamp and similar session preambles
-    const stripped = String(queryText).replace(/^\s*(SET\s+\S+\s*=\s*[^;]+;\s*)+/i, '').trim();
-    const q = stripped;
+    const q = String(queryText).replace(/^\s*(SET\s+\S+\s*=\s*[^;]+;\s*)+/i, '').trim();
     const qUp = q.toUpperCase().replace(/\s+/g, ' ');
-    const table = parseMainTable(q) || '(tabel tidak diketahui)';
+    const table = parseMainTable(q) || 'tabel tidak diketahui';
+    const tableSuffix = ` '${table}'`;
+    const clauses = ['JOIN', 'WHERE', 'LIKE', 'GROUP BY', 'HAVING', 'ORDER BY', 'LIMIT', 'DISTINCT'];
+    const tags = clauses.filter((clause) => new RegExp(`\\b${clause.replace(' ', '\\s+')}\\b`).test(qUp));
+    const describe = (purpose) => `${purpose}${tags.length ? ` [${tags.join(', ')}]` : ''}${tableSuffix}`;
 
-    if (qUp.match(/^SELECT\b/)) {
-      const k1 = 'SELECT';
-      const cols = getSelectColumns(q) || 'data';
-      const hasJoin = /\bJOIN\b/.test(qUp);
-      const joinCount = hasJoin ? (qUp.match(/\bJOIN\b/g) || []).length : 0;
-      const hasWhere = /\bWHERE\b/.test(qUp);
-      const hasLike = /\bLIKE\b/.test(qUp);
-      const hasGroup = /\bGROUP BY\b/.test(qUp);
-      const hasHaving = /\bHAVING\b/.test(qUp);
-      const hasOrder = /\bORDER BY\b/.test(qUp);
-      const hasLimit = /\bLIMIT\b/.test(qUp);
-      const hasSubquery = /\bIN\s*\(SELECT\b/.test(qUp);
-
-      let desc = `Ambil ${cols} dari \`${table}\``;
-      if (hasSubquery) desc += ', dengan subquery';
-      else if (joinCount >= 3) desc += `, gabungkan ${joinCount} tabel`;
-      else if (joinCount === 2) desc += `, gabungkan 2 tabel`;
-      else if (joinCount === 1) desc += `, gabungkan tabel lain`;
-      if (hasLike) desc += ', filter LIKE (pencarian pola)';
-      else if (hasWhere) desc += ', dengan filter kondisi';
-      if (hasGroup && hasHaving) desc += ', dikelompokkan & disaring';
-      else if (hasGroup) desc += ', dikelompokkan';
-      if (hasOrder && hasLimit) desc += ', diurutkan & dibatasi';
-      else if (hasOrder) desc += ', diurutkan';
-      else if (hasLimit) desc += ', dibatasi jumlahnya';
-      return { k1, k2: desc };
+    if (/^SELECT\b/.test(qUp)) {
+      return { k1: 'SELECT', k2: describe(getSelectColumns(q)) };
     }
-
-    if (qUp.match(/^INSERT\b/)) {
-      if (/\bON\s+DUPLICATE\s+KEY\b/.test(qUp)) return { k1: 'INSERT', k2: `Sisip atau perbarui data di \`${table}\` (upsert)` };
-      if (/\bINSERT\s+INTO\b.*\bSELECT\b/is.test(q)) return { k1: 'INSERT', k2: `Salin data hasil SELECT ke \`${table}\`` };
-      return { k1: 'INSERT', k2: `Tambah data baru ke \`${table}\`` };
+    if (/^INSERT\b/.test(qUp)) {
+      const purpose = /\bON\s+DUPLICATE\s+KEY\b/.test(qUp) ? 'Tambah/perbarui data' : /\bINSERT\s+INTO\b.*\bSELECT\b/is.test(q) ? 'Salin data' : 'Tambah data';
+      return { k1: 'INSERT', k2: describe(purpose) };
     }
-
-    if (qUp.match(/^UPDATE\b/)) {
-      const hasJoin = /\bJOIN\b/.test(qUp);
-      const hasWhere = /\bWHERE\b/.test(qUp);
-      let desc = `Perbarui data di \`${table}\``;
-      if (hasJoin) desc += ', melibatkan tabel lain (JOIN)';
-      if (hasWhere) desc += ', dengan kondisi filter';
-      return { k1: 'UPDATE', k2: desc };
-    }
-
-    if (qUp.match(/^DELETE\b/)) {
-      const hasWhere = /\bWHERE\b/.test(qUp);
-      return { k1: 'DELETE', k2: `Hapus data dari \`${table}\`${hasWhere ? ', dengan kondisi filter' : ' (semua baris!)'}` };
-    }
-
-    if (qUp.match(/^CALL\b/)) {
+    if (/^UPDATE\b/.test(qUp)) return { k1: 'UPDATE', k2: describe('Perbarui data') };
+    if (/^DELETE\b/.test(qUp)) return { k1: 'DELETE', k2: describe('Hapus data') };
+    if (/^CALL\b/.test(qUp)) {
       const procMatch = q.match(/CALL\s+`?(\w+)`?/i);
-      return { k1: 'CALL', k2: `Jalankan stored procedure \`${procMatch?.[1] || '?'}\`` };
+      return { k1: 'CALL', k2: `Jalankan prosedur (${procMatch?.[1] || '?'})` };
     }
-
-    if (qUp.match(/^CREATE\b/)) {
+    if (/^CREATE\b/.test(qUp)) {
       const type = qUp.includes('TABLE') ? 'tabel' : qUp.includes('INDEX') ? 'indeks' : qUp.includes('VIEW') ? 'view' : 'objek';
-      return { k1: 'DDL', k2: `Buat ${type} baru (\`${table}\`)` };
+      return { k1: 'DDL', k2: describe(`Buat ${type}`) };
     }
-    if (qUp.match(/^ALTER\b/)) return { k1: 'DDL', k2: `Ubah struktur tabel \`${table}\`` };
-    if (qUp.match(/^DROP\b/)) return { k1: 'DDL', k2: `Hapus struktur/tabel \`${table}\`` };
-    if (qUp.match(/^TRUNCATE\b/)) return { k1: 'DDL', k2: `Kosongkan seluruh data tabel \`${table}\`` };
-    if (qUp.match(/^(SHOW|DESCRIBE|EXPLAIN)\b/)) return { k1: 'SHOW', k2: 'Tampilkan informasi / struktur database' };
-    if (qUp.match(/^(SET|COMMIT|ROLLBACK|BEGIN|START\s+TRANSACTION)\b/)) return { k1: 'SESSION', k2: 'Perintah sesi atau transaksi database' };
-
-    return { k1: 'Lainnya', k2: `Perintah tidak dikenal pada objek \`${table}\`` };
+    if (/^ALTER\b/.test(qUp)) return { k1: 'DDL', k2: describe('Ubah struktur tabel') };
+    if (/^DROP\b/.test(qUp)) return { k1: 'DDL', k2: describe('Hapus struktur/tabel') };
+    if (/^TRUNCATE\b/.test(qUp)) return { k1: 'DDL', k2: describe('Kosongkan data') };
+    if (/^(SHOW|DESCRIBE|EXPLAIN)\b/.test(qUp)) return { k1: 'SHOW', k2: 'Tampilkan informasi database' };
+    if (/^(SET|COMMIT|ROLLBACK|BEGIN|START\s+TRANSACTION)\b/.test(qUp)) return { k1: 'SESSION', k2: 'Perintah sesi/transaksi' };
+    return { k1: 'Lainnya', k2: `Perintah tidak dikenal${tableSuffix}` };
   }
 
   // ─── Analysis & Export ────────────────────────────────────────────────────────
