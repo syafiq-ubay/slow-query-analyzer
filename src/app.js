@@ -1,6 +1,6 @@
 (() => {
   const $ = (id) => document.getElementById(id);
-  const state = { rows: [], filtered: [], displayRows: [], page: 0, pageSize: 10, selectedUser: '', uniqueMode: false };
+  const state = { rows: [], filtered: [], displayRows: [], page: 0, pageSize: 10, selectedUser: '', uniqueMode: false, _uniqueCache: null, _uniqueCacheKey: null };
   const fields = {
     time: 'mysql_@timestamp', user: 'mysql_user', schema: 'mysql_schema', queryTime: 'mysql_query_time',
     status: 'http_status_code', responseTime: 'http_response_time', path: 'http_path', referer: 'http_referer', query: 'mysql_query'
@@ -43,7 +43,7 @@
       userCanvas.chartTooltip.hidden = true;
     }
   });
-  window.addEventListener('resize', debounce(() => { if (state.rows.length) drawCharts(); }, 120));
+  window.addEventListener('resize', debounce(() => { if (state.rows.length) renderCharts(); }, 120));
 
   // ─── Data Source Mode (auto / manual) ────────────────────────────────────────
   (function initDataMode() {
@@ -396,6 +396,9 @@
       const matchesTerm = !term || [fields.time, fields.user, fields.schema, fields.queryTime, fields.status, fields.responseTime, fields.path, fields.referer, fields.query].some((key) => String(row[key] ?? '').toLocaleLowerCase('id-ID').includes(term));
       return matchesUser && matchesTerm;
     });
+    // Fix #10: invalidate unique cache whenever filtered set changes
+    state._uniqueCache = null;
+    state._uniqueCacheKey = null;
     state.page = 0; renderTable();
   }
   function populateUsers() {
@@ -406,45 +409,140 @@
     });
     if ([...select.options].some((option) => option.value === selected)) { select.value = selected; } else { state.selectedUser = ''; }
   }
+  // Fix #3: Normalize query literals so "id=12" and "id=57" map to the same fingerprint
+  function fingerprint(queryText) {
+    if (!queryText) return '';
+    return String(queryText)
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .replace(/--[^\r\n]*/g, ' ')
+      .replace(/'[^']*'/g, '?')
+      .replace(/\b\d+(?:\.\d+)?\b/g, '?')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
   function renderTable() {
-    state.displayRows = state.uniqueMode ? uniqueRows(state.filtered) : state.filtered.map((row) => ({ ...row, __count: 1 }));
+    // Fix #10: cache uniqueRows result, recompute only when filtered set changes
+    if (state.uniqueMode) {
+      const cacheKey = state.filtered.length + '|' + (state.filtered[0]?.[fields.time] ?? '');
+      if (!state._uniqueCache || state._uniqueCacheKey !== cacheKey) {
+        state._uniqueCache = uniqueRows(state.filtered);
+        state._uniqueCacheKey = cacheKey;
+      }
+      state.displayRows = state._uniqueCache;
+    } else {
+      // Fix #11: avoid copying every row in normal mode — use filtered directly
+      state.displayRows = state.filtered;
+    }
+
     const total = state.displayRows.length, pages = Math.max(1, Math.ceil(total / state.pageSize));
     state.page = Math.min(Math.max(state.page, 0), pages - 1);
     const start = state.page * state.pageSize;
     $('log-rows').innerHTML = state.displayRows.slice(start, start + state.pageSize).map((row) => {
+      // Fix #9: compute status and statusClass outside the template string
       const status = number(row[fields.status]);
       const statusClass = status == null ? '' : status >= 500 ? 'status-error' : status >= 400 ? 'status-warn' : 'status-ok';
-      return `<tr><td>${escapeHtml(display(row[fields.time]))}</td><td>${escapeHtml(display(row[fields.user]))}</td><td>${escapeHtml(display(row[fields.schema]))}</td><td>${Number(row.__count || 1).toLocaleString('id-ID')}</td><td>${escapeHtml(formatSeconds(number(row[fields.queryTime])))}</td><td>${status == null ? '—' : `<span class="status-pill ${statusClass}">${escapeHtml(Math.round(status))}</span>`}</td><td>${escapeHtml(formatSeconds(number(row[fields.responseTime])))}</td><td title="${escapeHtml(row[fields.path])}">${escapeHtml(display(row[fields.path]))}</td><td title="${escapeHtml(row[fields.referer])}">${escapeHtml(display(row[fields.referer]))}</td><td title="${escapeHtml(row[fields.query])}">${escapeHtml(display(row[fields.query]))}</td></tr>`;
+      const statusRounded = status == null ? null : Math.round(status);
+      const count = row.__count ?? 1;
+
+      // Fix #8:uniqueMode
+      const qtCell = escapeHtml(formatSeconds(number(row[fields.queryTime])));
+      const rtCell = escapeHtml(formatSeconds(number(row[fields.responseTime])));
+
+      // Fix #7: use ?? '' to avoid 'undefined' on null path/referer/query
+      const pathVal = row[fields.path] ?? '';
+      const refVal = row[fields.referer] ?? '';
+      const qryVal = row[fields.query] ?? '';
+
+      return [
+        '<tr>',
+        `<td>${escapeHtml(display(row[fields.time]))}</td>`,
+        `<td>${escapeHtml(display(row[fields.user]))}</td>`,
+        `<td>${escapeHtml(display(row[fields.schema]))}</td>`,
+        `<td>${count.toLocaleString('id-ID')}</td>`,
+        `<td>${qtCell}</td>`,
+        `<td>${statusRounded == null ? '\u2014' : `<span class="status-pill ${statusClass}">${statusRounded}</span>`}</td>`,
+        `<td>${rtCell}</td>`,
+        `<td title="${escapeHtml(pathVal)}"><div class="cell-path">${escapeHtml(display(pathVal))}</div></td>`,
+        `<td title="${escapeHtml(refVal)}"><div class="cell-path">${escapeHtml(display(refVal))}</div></td>`,
+        `<td title="${escapeHtml(qryVal)}"><div class="cell-query">${escapeHtml(display(qryVal))}</div></td>`,
+        '</tr>',
+      ].join('');
     }).join('');
     const range = dateRangeText(state.filtered);
     const summary = state.uniqueMode
       ? `${total.toLocaleString('id-ID')} baris unik dari ${state.filtered.length.toLocaleString('id-ID')} baris`
       : `${total.toLocaleString('id-ID')} baris`;
     $('table-count').textContent = `${summary}${range ? ` - ${range}` : ''}`;
-    $('page-info').textContent = total ? `${(start + 1).toLocaleString('id-ID')}–${Math.min(start + state.pageSize, total).toLocaleString('id-ID')} dari ${total.toLocaleString('id-ID')}` : 'Tidak ada baris yang cocok';
+    $('page-info').textContent = total ? `${(start + 1).toLocaleString('id-ID')}\u2013${Math.min(start + state.pageSize, total).toLocaleString('id-ID')} dari ${total.toLocaleString('id-ID')}` : 'Tidak ada baris yang cocok';
     $('previous-page').disabled = state.page === 0; $('next-page').disabled = state.page >= pages - 1;
   }
+
   function uniqueRows(rows) {
     const groups = new Map();
     rows.forEach((row) => {
-      const identity = row[fields.path]
-        ? [fields.user, fields.path]
-        : [fields.user, fields.path, fields.time, fields.schema, fields.query, fields.queryTime, fields.status, fields.responseTime, fields.referer];
-      const key = JSON.stringify(identity.map((field) => row[field] ?? ''));
-      if (!groups.has(key)) groups.set(key, { row: { ...row, __count: 0 }, queryTotal: 0, queryCount: 0, responseTotal: 0, responseCount: 0, latest: parseLogDate(row[fields.time]) });
+      const path = row[fields.path] ?? '';
+      const schema = String(row[fields.schema] ?? '');
+      const fp = fingerprint(row[fields.query]);   // Fix #3
+      const statusRaw = String(row[fields.status] ?? '');
+
+      // Fix #1 & #2: single consistent key shape (no time, no raw numeric values)
+      const key = JSON.stringify([
+        String(row[fields.user] ?? ''),
+        path,
+        schema,
+        fp,
+        statusRaw,
+      ]);
+
+      if (!groups.has(key)) {
+        groups.set(key, {
+          latestRow: { ...row, __count: 0 },           // Fix #4: seed with full row
+          queryTotal: 0, queryCount: 0, queryMax: -Infinity,   // Fix #5
+          responseTotal: 0, responseCount: 0, responseMax: -Infinity,
+          latest: null,
+        });
+      }
       const group = groups.get(key);
-      group.row.__count++;
-      const queryTime = number(row[fields.queryTime]), responseTime = number(row[fields.responseTime]), date = parseLogDate(row[fields.time]);
-      if (queryTime != null) { group.queryTotal += queryTime; group.queryCount++; }
-      if (responseTime != null) { group.responseTotal += responseTime; group.responseCount++; }
-      if (date && (!group.latest || date > group.latest)) { group.latest = date; group.row[fields.time] = row[fields.time]; }
+      group.latestRow.__count++;
+
+      const queryTime = number(row[fields.queryTime]);
+      const responseTime = number(row[fields.responseTime]);
+      const date = parseLogDate(row[fields.time]);
+
+      if (queryTime != null) {
+        group.queryTotal += queryTime;
+        group.queryCount++;
+      }
+      if (responseTime != null) {
+        group.responseTotal += responseTime;
+        group.responseCount++;
+      }
+
+      // Fix #4: replace the entire latestRow when a newer timestamp is found
+      if (date && (!group.latest || date > group.latest)) {
+        group.latest = date;
+        const count = group.latestRow.__count;
+        group.latestRow = { ...row, __count: count };
+      }
     });
-    return [...groups.values()].map((group) => {
-      if (group.queryCount) group.row[fields.queryTime] = group.queryTotal / group.queryCount;
-      if (group.responseCount) group.row[fields.responseTime] = group.responseTotal / group.responseCount;
-      return group.row;
-    });
+
+    // Fix #6: sort by latest descending so newest rows appear first
+    return [...groups.values()]
+      .sort((a, b) => (b.latest?.getTime() ?? 0) - (a.latest?.getTime() ?? 0))
+      .map((group) => {
+        const result = group.latestRow;
+        if (group.queryCount) {
+          result[fields.queryTime] = group.queryTotal / group.queryCount;
+        }
+        if (group.responseCount) {
+          result[fields.responseTime] = group.responseTotal / group.responseCount;
+        }
+        return result;
+      });
   }
+
   function dateRangeText(rows) {
     const dates = rows.map((row) => parseLogDate(row[fields.time])).filter(Boolean).sort((a, b) => a - b);
     if (!dates.length) return '';
