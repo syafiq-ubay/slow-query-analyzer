@@ -508,38 +508,37 @@
   }
 
   function classifyQuery(queryText) {
-    if (!queryText || String(queryText).trim() === '') return { k1: 'Tidak Diketahui', k2: '-' };
+    if (!queryText || String(queryText).trim() === '') return { k1: 'Tidak Diketahui', k2: '-', tabel: '-' };
     const cleaned = cleanQuery(queryText);
     const qUp = cleaned.toUpperCase().replace(/\s+/g, ' ');
-    const table = parseMainTable(cleaned) || 'tabel tidak diketahui';
-    const tableSuffix = ` '${table}'`;
+    const tabel = parseMainTable(cleaned) || '(tidak diketahui)';
     const clauses = ['JOIN', 'WHERE', 'LIKE', 'GROUP BY', 'HAVING', 'ORDER BY', 'LIMIT', 'DISTINCT'];
     const tags = clauses.filter((clause) => new RegExp(`\\b${clause.replace(' ', '\\s+')}\\b`).test(qUp));
-    const describe = (purpose) => `${purpose}${tags.length ? ` [${tags.join(', ')}]` : ''}${tableSuffix}`;
+    const describe = (purpose) => `${purpose}${tags.length ? ` [${tags.join(', ')}]` : ''}`;
 
     if (/^SELECT\b/.test(qUp)) {
-      return { k1: 'SELECT', k2: describe(getSelectPurpose(cleaned, qUp)) };
+      return { k1: 'SELECT', k2: describe(getSelectPurpose(cleaned, qUp)), tabel };
     }
     if (/^INSERT\b/.test(qUp)) {
       const purpose = /\bON\s+DUPLICATE\s+KEY\b/.test(qUp) ? 'Tambah/perbarui data' : /\bINSERT\s+INTO\b.*\bSELECT\b/is.test(cleaned) ? 'Salin data' : 'Tambah data';
-      return { k1: 'INSERT', k2: describe(purpose) };
+      return { k1: 'INSERT', k2: describe(purpose), tabel };
     }
-    if (/^UPDATE\b/.test(qUp)) return { k1: 'UPDATE', k2: describe('Perbarui data') };
-    if (/^DELETE\b/.test(qUp)) return { k1: 'DELETE', k2: describe('Hapus data') };
+    if (/^UPDATE\b/.test(qUp)) return { k1: 'UPDATE', k2: describe('Perbarui data'), tabel };
+    if (/^DELETE\b/.test(qUp)) return { k1: 'DELETE', k2: describe('Hapus data'), tabel };
     if (/^CALL\b/.test(qUp)) {
       const procMatch = cleaned.match(/CALL\s+`?(\w+)`?/i);
-      return { k1: 'CALL', k2: `Jalankan prosedur (${procMatch?.[1] || '?'})` };
+      return { k1: 'CALL', k2: `Jalankan prosedur (${procMatch?.[1] || '?'})`, tabel };
     }
     if (/^CREATE\b/.test(qUp)) {
       const type = qUp.includes('TABLE') ? 'tabel' : qUp.includes('INDEX') ? 'indeks' : qUp.includes('VIEW') ? 'view' : 'objek';
-      return { k1: 'DDL', k2: describe(`Buat ${type}`) };
+      return { k1: 'DDL', k2: describe(`Buat ${type}`), tabel };
     }
-    if (/^ALTER\b/.test(qUp)) return { k1: 'DDL', k2: describe('Ubah struktur tabel') };
-    if (/^DROP\b/.test(qUp)) return { k1: 'DDL', k2: describe('Hapus struktur/tabel') };
-    if (/^TRUNCATE\b/.test(qUp)) return { k1: 'DDL', k2: describe('Kosongkan data') };
-    if (/^(SHOW|DESCRIBE|EXPLAIN)\b/.test(qUp)) return { k1: 'SHOW', k2: 'Tampilkan informasi database' };
-    if (/^(SET|COMMIT|ROLLBACK|BEGIN|START\s+TRANSACTION)\b/.test(qUp)) return { k1: 'SESSION', k2: 'Perintah sesi/transaksi' };
-    return { k1: 'Lainnya', k2: describe('Perintah lainnya') };
+    if (/^ALTER\b/.test(qUp)) return { k1: 'DDL', k2: describe('Ubah struktur tabel'), tabel };
+    if (/^DROP\b/.test(qUp)) return { k1: 'DDL', k2: describe('Hapus struktur/tabel'), tabel };
+    if (/^TRUNCATE\b/.test(qUp)) return { k1: 'DDL', k2: describe('Kosongkan data'), tabel };
+    if (/^(SHOW|DESCRIBE|EXPLAIN)\b/.test(qUp)) return { k1: 'SHOW', k2: 'Tampilkan informasi database', tabel };
+    if (/^(SET|COMMIT|ROLLBACK|BEGIN|START\s+TRANSACTION)\b/.test(qUp)) return { k1: 'SESSION', k2: 'Perintah sesi/transaksi', tabel: '-' };
+    return { k1: 'Lainnya', k2: describe('Perintah lainnya'), tabel };
   }
 
   // ─── Excel Styling & Export Helpers ──────────────────────────────────────────
@@ -748,6 +747,14 @@
     });
     const k2Ranked = [...k2Map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
 
+    // Klasifikasi 3 distribution (nama tabel utama)
+    const k3Map = new Map();
+    rows.forEach((r) => {
+      const { tabel } = classifyQuery(r[fields.query]);
+      k3Map.set(tabel, (k3Map.get(tabel) || 0) + 1);
+    });
+    const k3Ranked = [...k3Map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
+
     // Top 10 user
     const userMap = new Map();
     rows.forEach((r) => {
@@ -779,10 +786,10 @@
     const top5 = [...rows].filter((r) => number(r[fields.queryTime]) != null)
       .sort((a, b) => (number(b[fields.queryTime]) || 0) - (number(a[fields.queryTime]) || 0)).slice(0, 5)
       .map((r) => {
-        const { k1, k2 } = classifyQuery(r[fields.query]);
+        const { k1, k2, tabel } = classifyQuery(r[fields.query]);
         return [
           String(r[fields.time] || '-'), String(r[fields.user] || '-'), String(r[fields.schema] || '-'),
-          f4(number(r[fields.queryTime])), k1, k2, String(r[fields.path] || '-')
+          f4(number(r[fields.queryTime])), k1, k2, tabel, String(r[fields.path] || '-')
         ];
       });
 
@@ -793,13 +800,13 @@
 
     // Title banner
     writeCell(ws, curRow, 0, 'SLOW QUERY & ACCESS LOG ANALYZER — EXECUTIVE SUMMARY', EXCEL_STYLES.title, false);
-    addMerge(ws, curRow, 0, curRow, 6, EXCEL_STYLES.title);
+    addMerge(ws, curRow, 0, curRow, 7, EXCEL_STYLES.title);
     rowHeights[curRow] = { hpt: 30 };
     curRow++;
 
     // Subtitle banner
     writeCell(ws, curRow, 0, `Dibuat: ${ts} WIB   |   Total Data Dianalisa: ${total.toLocaleString('id-ID')} baris`, EXCEL_STYLES.subtitle, false);
-    addMerge(ws, curRow, 0, curRow, 6, EXCEL_STYLES.subtitle);
+    addMerge(ws, curRow, 0, curRow, 7, EXCEL_STYLES.subtitle);
     rowHeights[curRow] = { hpt: 20 };
     curRow++;
 
@@ -809,7 +816,7 @@
 
     function renderSection(title, headers, rowsData, alignments, numFormats, badgeColIdx, badgeStyles) {
       writeCell(ws, curRow, 0, title, EXCEL_STYLES.section, false);
-      addMerge(ws, curRow, 0, curRow, headers.length - 1, EXCEL_STYLES.section);
+      addMerge(ws, curRow, 0, curRow, 7, EXCEL_STYLES.section);
       rowHeights[curRow] = { hpt: 24 };
       curRow++;
 
@@ -890,25 +897,34 @@
       [null, '#,##0', null]
     );
 
-    // 5. Top 10 User
+    // 5. Klasifikasi 3
     renderSection(
-      '5. TOP 10 USER MYSQL — TOTAL QUERY TIME',
+      '5. TOP 15 TABEL UTAMA YANG DIAKSES (KLASIFIKASI 3)',
+      ['Nama Tabel Utama', 'Jumlah Log', 'Persentase'],
+      k3Ranked.map(([k, n]) => [k, n, pct(n, total)]),
+      ['left', 'right', 'right'],
+      [null, '#,##0', null]
+    );
+
+    // 6. Top 10 User
+    renderSection(
+      '6. TOP 10 USER MYSQL — TOTAL QUERY TIME',
       ['User MySQL', 'Jumlah Log', 'Total Qt (detik)', 'Rata-rata Qt (detik)', 'Maks Qt (detik)'],
       userRanked.map(([u, d]) => [u, d.count, f4(d.total), f4(d.count ? d.total / d.count : 0), f4(d.max)]),
       ['left', 'right', 'right', 'right', 'right'],
       [null, '#,##0', '0.0000', '0.0000', '0.0000']
     );
 
-    // 6. Top 10 Schema
+    // 7. Top 10 Schema
     renderSection(
-      '6. TOP 10 SCHEMA DATABASE — RATA-RATA QUERY TIME',
+      '7. TOP 10 SCHEMA DATABASE — RATA-RATA QUERY TIME',
       ['Schema Database', 'Jumlah Log', 'Total Qt (detik)', 'Rata-rata Qt (detik)', 'Maks Qt (detik)'],
       schRanked.map(([s, d]) => [s, d.count, f4(d.total), f4(d.count ? d.total / d.count : 0), f4(d.max)]),
       ['left', 'right', 'right', 'right', 'right'],
       [null, '#,##0', '0.0000', '0.0000', '0.0000']
     );
 
-    // 7. HTTP Status
+    // 8. HTTP Status
     const statusRows = [
       ...stRanked.map(([s, n]) => {
         const c = Number(s);
@@ -919,25 +935,25 @@
       ['5xx Total', 'Subtotal Server Error', serverErr, pct(serverErr, statuses.length)]
     ];
     renderSection(
-      '7. DISTRIBUSI STATUS HTTP (NGINX)',
+      '8. DISTRIBUSI STATUS HTTP (NGINX)',
       ['HTTP Status', 'Kategori Respons', 'Jumlah Request', 'Persentase'],
       statusRows,
       ['center', 'left', 'right', 'right'],
       [null, null, '#,##0', null]
     );
 
-    // 8. Top 5 Slowest
+    // 9. Top 5 Slowest
     renderSection(
-      '8. 5 QUERY PALING LAMBAT (TOP BOTTLENECK)',
-      ['Waktu Eksekusi', 'User MySQL', 'Schema', 'Query Time (det)', 'Tipe (K1)', 'Tujuan Query (K2)', 'Path Nginx'],
+      '9. 5 QUERY PALING LAMBAT (TOP BOTTLENECK)',
+      ['Waktu Eksekusi', 'User MySQL', 'Schema', 'Query Time (det)', 'Tipe (K1)', 'Tujuan Query (K2)', 'Klasifikasi 3', 'Path Nginx'],
       top5,
-      ['center', 'left', 'left', 'right', 'center', 'left', 'left'],
-      [null, null, null, '0.0000', null, null, null]
+      ['center', 'left', 'left', 'right', 'center', 'left', 'left', 'left'],
+      [null, null, null, '0.0000', null, null, null, null]
     );
 
-    // 9. Rekomendasi
-    writeCell(ws, curRow, 0, '9. REKOMENDASI DAN TINDAK LANJUT', EXCEL_STYLES.section, false);
-    addMerge(ws, curRow, 0, curRow, 6, EXCEL_STYLES.section);
+    // 10. Rekomendasi
+    writeCell(ws, curRow, 0, '10. REKOMENDASI DAN TINDAK LANJUT', EXCEL_STYLES.section, false);
+    addMerge(ws, curRow, 0, curRow, 7, EXCEL_STYLES.section);
     rowHeights[curRow] = { hpt: 24 };
     curRow++;
 
@@ -963,7 +979,7 @@
       rowHeights[curRow] = { hpt: 22 };
       const st = rec.warn ? EXCEL_STYLES.recWarn : EXCEL_STYLES.recInfo;
       writeCell(ws, curRow, 0, rec.text, st, false);
-      addMerge(ws, curRow, 0, curRow, 6, st);
+      addMerge(ws, curRow, 0, curRow, 7, st);
       curRow++;
     });
 
@@ -974,11 +990,12 @@
       { wch: 28 },
       { wch: 22 },
       { wch: 20 },
-      { wch: 55 },
+      { wch: 50 },
+      { wch: 26 },
       { wch: 42 }
     ];
 
-    const range = { s: { r: 0, c: 0 }, e: { r: curRow - 1, c: 6 } };
+    const range = { s: { r: 0, c: 0 }, e: { r: curRow - 1, c: 7 } };
     ws['!ref'] = XLSX.utils.encode_range(range);
     return ws;
   }
@@ -1023,7 +1040,7 @@
       ['Jumlah', '__count', 12], ['Query Time (detik)', fields.queryTime, 18],
       ['HTTP Status', fields.status, 14], ['Response Time (detik)', fields.responseTime, 22],
       ['Path', fields.path, 42], ['Referer', fields.referer, 48],
-      ['Klasifikasi 1', '__k1', 16], ['Klasifikasi 2 ', '__k2', 52]
+      ['Klasifikasi 1', '__k1', 16], ['Klasifikasi 2', '__k2', 44], ['Klasifikasi 3', '__tabel', 26]
     ];
     const ws1 = {};
     ws1['!cols'] = columns.map(([, , wch]) => ({ wch }));
@@ -1051,6 +1068,9 @@
           align = EXCEL_STYLES.cellCenter;
         } else if (field === '__k2') {
           val = classifyQuery(row[fields.query]).k2;
+          align = EXCEL_STYLES.cellLeft;
+        } else if (field === '__tabel') {
+          val = classifyQuery(row[fields.query]).tabel;
           align = EXCEL_STYLES.cellLeft;
         } else if (field === fields.queryTime || field === fields.responseTime) {
           val = number(row[field]);
