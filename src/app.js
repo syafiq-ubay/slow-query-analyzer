@@ -2,7 +2,7 @@
   const $ = (id) => document.getElementById(id);
   const state = { rows: [], filtered: [], displayRows: [], page: 0, pageSize: 10, selectedUser: '', uniqueMode: false, _uniqueCache: null, _uniqueCacheKey: null };
   const fields = {
-    time: 'mysql_@timestamp', user: 'mysql_user', schema: 'mysql_schema', queryTime: 'mysql_query_time',
+    id: 'merge_id', time: 'mysql_@timestamp', nginxTime: 'http_timestamp', user: 'mysql_user', schema: 'mysql_schema', queryTime: 'mysql_query_time',
     status: 'http_status_code', responseTime: 'http_response_time', path: 'http_path', referer: 'http_referer', query: 'mysql_query'
   };
   const number = (value) => {
@@ -130,8 +130,10 @@
       const rows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
       if (!rows.length) throw new Error('Sheet Excel tidak memiliki baris data.');
       const headers = Object.keys(rows[0]);
-      const missing = Object.values(fields).filter((field) => !headers.includes(field));
+      const optionalFields = new Set([fields.id, fields.nginxTime]);
+      const missing = Object.values(fields).filter((field) => !optionalFields.has(field) && !headers.includes(field));
       if (missing.length) throw new Error(`Kolom merge tidak lengkap. Kolom yang tidak ditemukan: ${missing.join(', ')}`);
+      rows.forEach((row, index) => { if (!row[fields.id]) row[fields.id] = index + 1; });
       state.rows = rows;
       $('file-name').textContent = file.name;
       $('file-detail').textContent = `${rows.length.toLocaleString('id-ID')} baris · ${workbook.SheetNames.length} sheet`;
@@ -639,6 +641,68 @@
     return { k1: 'Lainnya', k2: describe('Perintah lainnya'), tabel };
   }
 
+  function classifySelectedColumns(queryText) {
+    const text = cleanQuery(queryText || '');
+    if (!/^SELECT\b/i.test(text)) return { first: '-', last: '-' };
+    let depth = 0, quote = '', from = -1;
+    for (let i = 6; i < text.length; i++) {
+      const ch = text[i];
+      if (quote) { if (ch === '\\') { i++; continue; } if (ch === quote) quote = ''; continue; }
+      if (ch === "'" || ch === '"' || ch === '`') { quote = ch; continue; }
+      if (ch === '(') depth++;
+      else if (ch === ')') depth = Math.max(0, depth - 1);
+      else if (depth === 0 && /^FROM\b/i.test(text.slice(i))) { from = i; break; }
+    }
+    if (from < 0) return { first: '-', last: '-' };
+    const list = text.slice(6, from).replace(/^\s*DISTINCT\s+/i, '').trim();
+    const columns = []; let start = 0; depth = 0; quote = '';
+    for (let i = 0; i < list.length; i++) {
+      const ch = list[i];
+      if (quote) { if (ch === '\\') { i++; continue; } if (ch === quote) quote = ''; continue; }
+      if (ch === "'" || ch === '"' || ch === '`') { quote = ch; continue; }
+      if (ch === '(') depth++;
+      else if (ch === ')') depth = Math.max(0, depth - 1);
+      else if (ch === ',' && depth === 0) { columns.push(list.slice(start, i)); start = i + 1; }
+    }
+    columns.push(list.slice(start));
+    const normalized = columns.map(summarizeSelectedExpression).filter(Boolean);
+    return normalized.length
+      ? { first: normalized.slice(0, 3).join(', '), last: normalized.slice(-3).join(', ') }
+      : { first: '-', last: '-' };
+  }
+
+  function summarizeSelectedExpression(expression) {
+    let text = String(expression || '').trim();
+    if (!text) return '';
+
+    const alias = text.match(/\s+AS\s+(`[^`]+`|[A-Za-z_$][\w$]*)\s*$/i);
+    if (alias) return alias[1].replace(/`/g, '');
+
+    // Ignore quoted string contents so words in CASE values are not mistaken for columns.
+    const scanText = text.replace(/'(?:''|\\.|[^'])*'/g, (literal) => ' '.repeat(literal.length));
+    const ignored = new Set([
+      'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'AS', 'DISTINCT', 'ALL', 'NULL', 'TRUE', 'FALSE',
+      'AND', 'OR', 'NOT', 'IS', 'IN', 'LIKE', 'BETWEEN', 'REGEXP', 'RLIKE', 'DIV', 'MOD',
+      'INTERVAL', 'YEAR', 'MONTH', 'DAY', 'HOUR', 'MINUTE', 'SECOND', 'CURRENT_DATE', 'CURRENT_TIME'
+    ]);
+    const names = [];
+    const tokenPattern = /`([^`]+)`|([A-Za-z_$][\w$]*)/g;
+    let match;
+    while ((match = tokenPattern.exec(scanText))) {
+      const name = match[1] || match[2];
+      const before = scanText.slice(0, match.index).match(/\S\s*$/)?.[0] || '';
+      const after = scanText.slice(tokenPattern.lastIndex).match(/^\s*\S/)?.[0] || '';
+      if (after.trim() === '.') continue; // table/schema qualifier
+      if (before.trim() === '.') { names.push(name); continue; }
+      if (ignored.has(name.toUpperCase())) continue;
+      if (after.trim() === '(') continue; // function name
+      names.push(name);
+    }
+    const uniqueNames = [...new Set(names)];
+    if (!uniqueNames.length) return '*';
+    return uniqueNames.length > 3 ? `${uniqueNames.slice(0, 3).join(', ')}, …` : uniqueNames.join(', ');
+  }
+
   // ─── Excel Styling & Export Helpers ──────────────────────────────────────────
   const EXCEL_STYLES = {
     title: {
@@ -796,6 +860,23 @@
     return cell;
   }
 
+  function fitColumnWidths(ws, maxWidth = 32) {
+    if (!ws['!ref']) return;
+    const range = XLSX.utils.decode_range(ws['!ref']);
+    const widths = [];
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      let longest = 8;
+      for (let r = range.s.r; r <= range.e.r; r++) {
+        const cell = ws[XLSX.utils.encode_cell({ r, c })];
+        if (!cell || cell.v == null) continue;
+        const lines = String(cell.w ?? cell.v).split(/\r?\n/);
+        longest = Math.max(longest, ...lines.map((line) => line.length));
+      }
+      widths[c] = { wch: Math.min(maxWidth, Math.max(8, longest + 2)) };
+    }
+    ws['!cols'] = widths;
+  }
+
   function addMerge(ws, sR, sC, eR, eC, style) {
     if (!ws['!merges']) ws['!merges'] = [];
     ws['!merges'].push({ s: { r: sR, c: sC }, e: { r: eR, c: eC } });
@@ -852,6 +933,15 @@
       k3Map.set(tabel, (k3Map.get(tabel) || 0) + 1);
     });
     const k3Ranked = [...k3Map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
+
+    const k4Map = new Map(), k5Map = new Map();
+    rows.forEach((r) => {
+      const { first, last } = classifySelectedColumns(r[fields.query]);
+      k4Map.set(first, (k4Map.get(first) || 0) + 1);
+      k5Map.set(last, (k5Map.get(last) || 0) + 1);
+    });
+    const k4Ranked = [...k4Map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
+    const k5Ranked = [...k5Map.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15);
 
     // Top 10 user
     const userMap = new Map();
@@ -1004,6 +1094,19 @@
       [null, '#,##0', null]
     );
 
+    renderSection(
+      '6. TOP 15 KELOMPOK TIGA KOLOM PERTAMA (KLASIFIKASI 4)',
+      ['Tiga Kolom Pertama', 'Jumlah Log', 'Persentase'],
+      k4Ranked.map(([k, n]) => [k, n, pct(n, total)]),
+      ['left', 'right', 'right'], [null, '#,##0', null]
+    );
+    renderSection(
+      '7. TOP 15 KELOMPOK TIGA KOLOM TERAKHIR (KLASIFIKASI 5)',
+      ['Tiga Kolom Terakhir', 'Jumlah Log', 'Persentase'],
+      k5Ranked.map(([k, n]) => [k, n, pct(n, total)]),
+      ['left', 'right', 'right'], [null, '#,##0', null]
+    );
+
     // 6. Top 10 User
     renderSection(
       '6. TOP 10 USER MYSQL — TOTAL QUERY TIME',
@@ -1100,8 +1203,7 @@
 
   function buildQueryDetailSheet(rows) {
     const ws = {};
-    const headers = ['waktu', 'path', 'referer', 'original_query'];
-    ws['!cols'] = [{ wch: 26 }, { wch: 45 }, { wch: 45 }, { wch: 95 }];
+    const headers = ['logs_id', 'waktu_mysql', 'waktu_nginx', 'path', 'referer', 'klasifikasi_1', 'klasifikasi_2', 'klasifikasi_3', 'klasifikasi_4', 'klasifikasi_5', 'original_query'];
     const rowHeights = [{ hpt: 26 }];
 
     // 1. Header row (tanpa warna / no fill)
@@ -1114,10 +1216,17 @@
       const rowIdx = idx + 1;
       rowHeights[rowIdx] = { hpt: 20 };
 
-      writeCell(ws, rowIdx, 0, r[fields.time] ?? '', EXCEL_STYLES.cellCenter, false);
-      writeCell(ws, rowIdx, 1, r[fields.path] ?? '', EXCEL_STYLES.cellLeft, false);
-      writeCell(ws, rowIdx, 2, r[fields.referer] ?? '', EXCEL_STYLES.cellLeft, false);
-      writeCell(ws, rowIdx, 3, r[fields.query] ?? '', {
+      const classes = classifyQuery(r[fields.query]);
+      const selected = classifySelectedColumns(r[fields.query]);
+      writeCell(ws, rowIdx, 0, r[fields.id] || idx + 1, EXCEL_STYLES.cellCenter, false);
+      writeCell(ws, rowIdx, 1, r[fields.time] ?? '', EXCEL_STYLES.cellCenter, false);
+      writeCell(ws, rowIdx, 2, r[fields.nginxTime] ?? '', EXCEL_STYLES.cellCenter, false);
+      writeCell(ws, rowIdx, 3, r[fields.path] ?? '', EXCEL_STYLES.cellLeft, false);
+      writeCell(ws, rowIdx, 4, r[fields.referer] ?? '', EXCEL_STYLES.cellLeft, false);
+      [classes.k1, classes.k2, classes.tabel, selected.first, selected.last].forEach((value, col) => {
+        writeCell(ws, rowIdx, col + 5, value, EXCEL_STYLES.cellLeft, false);
+      });
+      writeCell(ws, rowIdx, 10, r[fields.query] ?? '', {
         ...EXCEL_STYLES.cellLeft,
         alignment: { horizontal: 'left', vertical: 'center', wrapText: true }
       }, false);
@@ -1127,6 +1236,7 @@
     const range = { s: { r: 0, c: 0 }, e: { r: rows.length, c: headers.length - 1 } };
     ws['!ref'] = XLSX.utils.encode_range(range);
     ws['!autofilter'] = { ref: ws['!ref'] };
+    fitColumnWidths(ws, 38);
     return ws;
   }
 
@@ -1134,14 +1244,16 @@
     if (!window.XLSX) return showNotice('Library Excel belum termuat. Periksa koneksi internet lalu muat ulang halaman.');
     if (!state.displayRows.length) return showNotice('Tidak ada baris hasil filter untuk diunduh.');
     const columns = [
-      ['Waktu', fields.time, 24], ['User MySQL', fields.user, 22], ['Schema', fields.schema, 20],
+      ['Merge Id', fields.id, 12],
+      ['Waktu MySQL', fields.time, 24], ['Waktu Nginx', fields.nginxTime, 24],
+      ['User MySQL', fields.user, 22], ['Schema', fields.schema, 20],
       ['Jumlah', '__count', 12], ['Query Time (detik)', fields.queryTime, 18],
       ['HTTP Status', fields.status, 14], ['Response Time (detik)', fields.responseTime, 22],
       ['Path', fields.path, 42], ['Referer', fields.referer, 48],
-      ['Klasifikasi 1', '__k1', 16], ['Klasifikasi 2', '__k2', 44], ['Klasifikasi 3', '__tabel', 26]
+      ['Klasifikasi 1', '__k1', 16], ['Klasifikasi 2', '__k2', 44], ['Klasifikasi 3', '__tabel', 26],
+      ['Klasifikasi 4', '__k4', 40], ['Klasifikasi 5', '__k5', 40]
     ];
     const ws1 = {};
-    ws1['!cols'] = columns.map(([, , wch]) => ({ wch }));
     const rowHeights = [{ hpt: 24 }];
 
     columns.forEach(([title], c) => {
@@ -1170,6 +1282,10 @@
         } else if (field === '__tabel') {
           val = classifyQuery(row[fields.query]).tabel;
           align = EXCEL_STYLES.cellLeft;
+        } else if (field === '__k4' || field === '__k5') {
+          const selected = classifySelectedColumns(row[fields.query]);
+          val = field === '__k4' ? selected.first : selected.last;
+          align = EXCEL_STYLES.cellLeft;
         } else if (field === fields.queryTime || field === fields.responseTime) {
           val = number(row[field]);
           numFmt = '0.0000';
@@ -1193,10 +1309,13 @@
     ws1['!rows'] = rowHeights;
     ws1['!ref'] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: state.displayRows.length, c: columns.length - 1 } });
     ws1['!autofilter'] = { ref: ws1['!ref'] };
+    fitColumnWidths(ws1, 38);
 
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, ws1, 'Merged Logs');
-    XLSX.utils.book_append_sheet(workbook, buildSummarySheet(state.displayRows), 'Summary Report');
+    const summarySheet = buildSummarySheet(state.displayRows);
+    fitColumnWidths(summarySheet, 32);
+    XLSX.utils.book_append_sheet(workbook, summarySheet, 'Summary Report');
     XLSX.utils.book_append_sheet(workbook, buildQueryDetailSheet(state.displayRows), 'Detail Query');
     const date = new Date().toISOString().slice(0, 10);
     XLSX.writeFile(workbook, `merged-logs-filtered-${date}.xlsx`);

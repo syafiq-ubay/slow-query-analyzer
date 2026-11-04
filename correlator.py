@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 from collections import defaultdict
+from bisect import bisect_left, bisect_right
 import re
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
@@ -28,16 +29,57 @@ def correlate_all(
     mysql_records: Iterable[Dict[str, Any]],
     nginx_records: Iterable[Dict[str, Any]],
 ) -> Iterator[Dict[str, Any]]:
-    """Join records whose timestamps match to the displayed second."""
+    """Join MySQL queries to the closest plausible Nginx request.
+
+    When both sources provide the relevant fields, the Nginx log name must
+    end in the MySQL user name, its response time must cover the query time
+    (with at most ten seconds of overhead), and event timestamps may differ
+    by at most ten seconds. Older/incomplete records retain exact-second
+    timestamp matching as a compatibility fallback.
+    """
     by_timestamp: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    timed_nginx: List[tuple[float, Dict[str, Any]]] = []
     for nginx in nginx_records:
         key = _timestamp_key(nginx.get("@timestamp"))
         if key is not None:
             by_timestamp[key].append(nginx)
+        timestamp = parse_timestamp(nginx.get("@timestamp"))
+        if timestamp is not None:
+            timed_nginx.append((timestamp, nginx))
+    timed_nginx.sort(key=lambda item: item[0])
+    nginx_times = [item[0] for item in timed_nginx]
 
     for mysql in mysql_records:
-        key = _timestamp_key(mysql.get("@timestamp"))
-        matches = by_timestamp.get(key, []) if key is not None else []
+        mysql_time = parse_timestamp(mysql.get("@timestamp"))
+        user = _normal_user(mysql.get("user"))
+        query_time = _duration(mysql.get("query_time"))
+        candidates: List[tuple[float, Dict[str, Any]]] = []
+        if mysql_time is not None:
+            start = bisect_left(nginx_times, mysql_time - 10)
+            end = bisect_right(nginx_times, mysql_time + 10)
+            for nginx_time, nginx in timed_nginx[start:end]:
+                log_user = _log_user(nginx.get("_log_name"))
+                response_time = _duration(nginx.get("rt"))
+                if user and log_user and user != log_user:
+                    continue
+                if query_time is not None and response_time is not None:
+                    if response_time < query_time or response_time - query_time > 10:
+                        continue
+                candidates.append((abs(mysql_time - nginx_time), nginx))
+
+        # Apply strict checks whenever the record contains the required
+        # metadata; exact-second matching remains for legacy/incomplete logs.
+        strict_matches = [nginx for _, nginx in candidates
+                          if user and _log_user(nginx.get("_log_name")) == user
+                          and query_time is not None and _duration(nginx.get("rt")) is not None]
+        if strict_matches:
+            closest_gap = min(abs(mysql_time - parse_timestamp(n.get("@timestamp"))) for n in strict_matches)
+            matches = [n for n in strict_matches
+                       if abs(mysql_time - parse_timestamp(n.get("@timestamp"))) == closest_gap]
+        else:
+            key = _timestamp_key(mysql.get("@timestamp"))
+            matches = by_timestamp.get(key, []) if key is not None else []
+            matches = [n for n in matches if _needs_legacy_fallback(mysql, n, user, query_time)]
         if not matches:
             yield _merged_row(mysql, None)
             continue
@@ -69,6 +111,7 @@ def _merged_row(
         "mysql_rows_sent": mysql.get("rows_sent", ""),
         "mysql_query": mysql.get("query", ""),
         "http_timestamp": nginx.get("@timestamp", "") if nginx else "",
+        "http_log_name": nginx.get("_log_name", "") if nginx else "",
         "http_method": nginx.get("method", "") if nginx else "",
         "http_status_code": nginx.get("code", "") if nginx else "",
         "http_response_time": nginx.get("rt", "") if nginx else "",
@@ -79,6 +122,57 @@ def _merged_row(
         "http_referer": nginx.get("referer", "") if nginx else "",
         "http_user_agent": nginx.get("agent", "") if nginx else "",
     }
+
+
+def _duration(value: Any) -> Optional[float]:
+    """Parse a duration in seconds, including common unit-suffixed values."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.fullmatch(r"\s*(-?\d+(?:\.\d+)?)\s*(ms|s)?\s*", str(value), re.I)
+    if not match:
+        return None
+    number = float(match.group(1))
+    return number / 1000 if (match.group(2) or "").lower() == "ms" else number
+
+
+def _normal_user(value: Any) -> str:
+    return _account_key(value)
+
+
+def _log_user(value: Any) -> str:
+    """Extract and normalize the account suffix from an Nginx log name."""
+    name = str(value or "").strip().lower()
+    name = name.rsplit(".", 1)[-1] if "." in name else name
+    return _account_key(name)
+
+
+def _account_key(value: Any) -> str:
+    """Normalize account-name variants such as ``simbcav3`` and ``simbca-v3``."""
+    name = str(value or "").strip().lower()
+    # Nginx log names can insert an API namespace before the account name.
+    name = re.sub(r"^api[-_.]+", "", name)
+    # The MySQL and Nginx sources inconsistently include separators before
+    # deployment/version suffixes (for example ``cav3`` vs ``ca-v3``).
+    name = re.sub(r"[-_.]?v\d+$", "", name)
+    # Ignore remaining punctuation/case differences while preserving digits
+    # that are part of the account itself.
+    return re.sub(r"[^a-z0-9]", "", name)
+
+
+def _needs_legacy_fallback(
+    mysql: Dict[str, Any], nginx: Dict[str, Any], user: str, query_time: Optional[float]
+) -> bool:
+    """Allow exact-second matching only when a required field is unavailable."""
+    log_name = str(nginx.get("_log_name") or "").strip()
+    response_time = _duration(nginx.get("rt"))
+    if user and log_name and _log_user(log_name) != user:
+        return False
+    if user and log_name and query_time is not None and response_time is not None:
+        # All correlation fields exist, so an invalid timing pair must stay rejected.
+        return False
+    return True
 
 
 _SQL_STRING = re.compile(r"'(?:''|\\.|[^'])*'|\"(?:\"\"|\\.|[^\"])*\"")

@@ -34,7 +34,7 @@ docker compose run --rm elastic-export nginx \
 
 ## Ambil kedua sumber dan gabungkan
 
-Timestamp pada file Excel ditampilkan dalam zona waktu Asia/Jakarta dengan format `MMM DD, YYYY @ HH:mm:ss.SSS`, contohnya `Oct 26, 2026 @ 08:56:50.238`. Mode `merge` memasangkan record berdasarkan waktu yang sama hingga detik, sesuai tanggal tanpa milidetik; jika beberapa record Nginx memiliki waktu yang sama, semuanya menghasilkan pasangan baris.
+Timestamp pada file Excel ditampilkan dalam zona waktu Asia/Jakarta dengan format `MMM DD, YYYY @ HH:mm:ss.SSS`, contohnya `Oct 26, 2026 @ 08:56:50.238`. Mode `merge` mencocokkan `user` MySQL dengan akhiran `_log_name` Nginx setelah menormalkan awalan `api-`, tanda pemisah, dan akhiran versi seperti `v3`. Contohnya `simbcav3` cocok dengan `access.simbca-v3`, dan `hrdbcav3` dengan `access.api-hrdbca-v3`. `rt` Nginx harus setidaknya sebesar `query_time` MySQL dengan selisih maksimal 10 detik, dan jarak timestamp dibatasi hingga 10 detik. Jika ada beberapa kandidat valid, kandidat dengan timestamp terdekat dipilih. Untuk record lama yang tidak memiliki metadata tersebut, pencocokan waktu yang sama hingga detik tetap digunakan. Hasil merge menyertakan `_log_name` pada kolom `http_log_name`.
 
 Hasil diurutkan dari waktu terbaru ke terlama, sehingga record terbaru muncul di bagian atas.
 
@@ -52,7 +52,7 @@ Dashboard HTML tersedia di `src/index.html`. Buka file tersebut di browser, pili
 
 Data Excel dibaca dan diproses langsung di browser; tidak ada backend atau database dan file tidak diunggah. Saat ini halaman memuat library pembaca Excel dari jsDelivr, sehingga perlu koneksi internet ketika dashboard dibuka.
 
-Status Nginx yang dikecualikan secara default diatur lewat `NGINX_EXCLUDE_CODES` di `.env`. Isi dengan daftar dipisahkan koma, misalnya `401,403,499`; jika kosong, tidak ada status yang otomatis dikecualikan. Opsi `--exclude-code` tetap bisa dipakai untuk menambahkan pengecualian saat menjalankan perintah. Pengaturan ini berlaku pada mode `nginx` dan `merge`. Hasil merge memiliki satu baris untuk setiap pasangan timestamp yang sama. Record MySQL tanpa pasangan tetap ditampilkan dengan kolom Nginx kosong. `--max-records` berlaku terpisah untuk masing-masing data view.
+Status Nginx yang dikecualikan secara default diatur lewat `NGINX_EXCLUDE_CODES` di `.env`. Isi dengan daftar dipisahkan koma, misalnya `401,403,499`; jika kosong, tidak ada status yang otomatis dikecualikan. Opsi `--exclude-code` tetap bisa dipakai untuk menambahkan pengecualian saat menjalankan perintah. Pengaturan ini berlaku pada mode `nginx` dan `merge`. Record MySQL tanpa pasangan tetap ditampilkan dengan kolom Nginx kosong. `--max-records` berlaku terpisah untuk masing-masing data view.
 
 ## Kredensial dan konfigurasi
 
