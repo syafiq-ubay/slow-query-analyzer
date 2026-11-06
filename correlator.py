@@ -2,9 +2,11 @@
 
 from datetime import datetime, timezone
 from collections import defaultdict
-from bisect import bisect_left, bisect_right
+from bisect import bisect_right
 import re
 from typing import Any, Dict, Iterable, Iterator, List, Optional
+
+MAX_TIMESTAMP_GAP: float = 120.0  # seconds (2 menit)
 
 
 def parse_timestamp(value: Any) -> Optional[float]:
@@ -31,55 +33,65 @@ def correlate_all(
 ) -> Iterator[Dict[str, Any]]:
     """Join MySQL queries to the closest plausible Nginx request.
 
-    When both sources provide the relevant fields, the Nginx log name must
-    end in the MySQL user name, its response time must cover the query time
-    (with at most ten seconds of overhead), and event timestamps may differ
-    by at most ten seconds. Older/incomplete records retain exact-second
-    timestamp matching as a compatibility fallback.
+    Nginx timestamps must be strictly later than the MySQL timestamp, but
+    within 2 minutes (mysql_time < nginx_time <= mysql_time + 120).
+    Existing user and response-duration checks still apply. Older/incomplete
+    records retain exact-second key matching only when their full timestamps
+    still satisfy the later-than rule.
     """
     by_timestamp: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-    timed_nginx: List[tuple[float, Dict[str, Any]]] = []
+    timed_nginx_by_user: Dict[str, List[tuple[float, Dict[str, Any]]]] = defaultdict(list)
     for nginx in nginx_records:
         key = _timestamp_key(nginx.get("@timestamp"))
         if key is not None:
             by_timestamp[key].append(nginx)
         timestamp = parse_timestamp(nginx.get("@timestamp"))
         if timestamp is not None:
-            timed_nginx.append((timestamp, nginx))
-    timed_nginx.sort(key=lambda item: item[0])
-    nginx_times = [item[0] for item in timed_nginx]
+            log_user = _log_user(nginx.get("_log_name"))
+            if log_user:
+                timed_nginx_by_user[log_user].append((timestamp, nginx))
+    nginx_times_by_user = {}
+    for log_user, records in timed_nginx_by_user.items():
+        records.sort(key=lambda item: item[0])
+        nginx_times_by_user[log_user] = [timestamp for timestamp, _ in records]
 
     for mysql in mysql_records:
         mysql_time = parse_timestamp(mysql.get("@timestamp"))
         user = _normal_user(mysql.get("user"))
         query_time = _duration(mysql.get("query_time"))
-        candidates: List[tuple[float, Dict[str, Any]]] = []
+        closest_strict_match: Optional[Dict[str, Any]] = None
         if mysql_time is not None:
-            start = bisect_left(nginx_times, mysql_time - 10)
-            end = bisect_right(nginx_times, mysql_time + 10)
-            for nginx_time, nginx in timed_nginx[start:end]:
-                log_user = _log_user(nginx.get("_log_name"))
-                response_time = _duration(nginx.get("rt"))
-                if user and log_user and user != log_user:
-                    continue
-                if query_time is not None and response_time is not None:
-                    if response_time < query_time or response_time - query_time > 10:
+            # Strict matches are indexed by normalized log user and sorted by
+            # timestamp. Scan candidate Nginx requests whose timestamps fall
+            # within (mysql_time, mysql_time + MAX_TIMESTAMP_GAP].
+            if user and query_time is not None:
+                user_records = timed_nginx_by_user.get(user, [])
+                user_times = nginx_times_by_user.get(user, [])
+                start = bisect_right(user_times, mysql_time)
+                end = bisect_right(user_times, mysql_time + MAX_TIMESTAMP_GAP)
+                for record_index in range(start, end):
+                    _, nginx = user_records[record_index]
+                    response_time = _duration(nginx.get("rt"))
+                    if response_time is None:
                         continue
-                candidates.append((abs(mysql_time - nginx_time), nginx))
+                    if query_time <= response_time <= query_time + 120:
+                        closest_strict_match = nginx
+                        break
 
         # Apply strict checks whenever the record contains the required
         # metadata; exact-second matching remains for legacy/incomplete logs.
-        strict_matches = [nginx for _, nginx in candidates
-                          if user and _log_user(nginx.get("_log_name")) == user
-                          and query_time is not None and _duration(nginx.get("rt")) is not None]
-        if strict_matches:
-            closest_gap = min(abs(mysql_time - parse_timestamp(n.get("@timestamp"))) for n in strict_matches)
-            matches = [n for n in strict_matches
-                       if abs(mysql_time - parse_timestamp(n.get("@timestamp"))) == closest_gap]
+        if closest_strict_match is not None:
+            matches = [closest_strict_match]
         else:
             key = _timestamp_key(mysql.get("@timestamp"))
             matches = by_timestamp.get(key, []) if key is not None else []
-            matches = [n for n in matches if _needs_legacy_fallback(mysql, n, user, query_time)]
+            matches = [
+                n for n in matches
+                if mysql_time is not None
+                and (nginx_time := parse_timestamp(n.get("@timestamp"))) is not None
+                and nginx_time > mysql_time
+                and _needs_legacy_fallback(mysql, n, user, query_time)
+            ]
         if not matches:
             yield _merged_row(mysql, None)
             continue
@@ -154,8 +166,10 @@ def _account_key(value: Any) -> str:
     # Nginx log names can insert an API namespace before the account name.
     name = re.sub(r"^api[-_.]+", "", name)
     # The MySQL and Nginx sources inconsistently include separators before
-    # deployment/version suffixes (for example ``cav3`` vs ``ca-v3``).
-    name = re.sub(r"[-_.]?v\d+$", "", name)
+    # deployment/version suffixes (for example ``simbcav3`` vs ``simbca-v3``).
+    # Standardize version suffixes like ``-v3`` or ``_v3`` to ``v3`` without
+    # removing the version number.
+    name = re.sub(r"[-_.]?v0*(\d+)$", r"v\1", name)
     # Ignore remaining punctuation/case differences while preserving digits
     # that are part of the account itself.
     return re.sub(r"[^a-z0-9]", "", name)

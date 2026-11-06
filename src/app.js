@@ -411,17 +411,16 @@
     });
     if ([...select.options].some((option) => option.value === selected)) { select.value = selected; } else { state.selectedUser = ''; }
   }
-  // Fix #3: Normalize query literals so "id=12" and "id=57" map to the same fingerprint
+  // Normalize query literals and boilerplate so variations of the same query map to the same fingerprint
   function fingerprint(queryText) {
     if (!queryText) return '';
-    return String(queryText)
-      .replace(/\/\*[\s\S]*?\*\//g, ' ')
-      .replace(/--[^\r\n]*/g, ' ')
-      .replace(/'[^']*'/g, '?')
-      .replace(/\b\d+(?:\.\d+)?\b/g, '?')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .toLowerCase();
+    let q = cleanQuery(queryText);
+    q = q.replace(/'(?:''|\\.|[^'])*'|"(?:""|\\.|[^"])*"/g, '?');
+    q = q.replace(/\b(?:0x[0-9a-f]+|0b[01]+|-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)\b/gi, '?');
+    q = q.replace(/\bIN\s*\(\s*\?(?:\s*,\s*\?)*\s*\)/gi, 'IN (?)');
+    q = q.replace(/`/g, '');
+    q = q.replace(/;\s*$/, '');
+    return q.replace(/\s+/g, ' ').trim().toLowerCase();
   }
 
   function renderTable() {
@@ -484,25 +483,19 @@
   function uniqueRows(rows) {
     const groups = new Map();
     rows.forEach((row) => {
-      const path = row[fields.path] ?? '';
+      const user = String(row[fields.user] ?? '');
       const schema = String(row[fields.schema] ?? '');
-      const fp = fingerprint(row[fields.query]);   // Fix #3
-      const statusRaw = String(row[fields.status] ?? '');
+      const fp = fingerprint(row[fields.query]);
 
-      // Fix #1 & #2: single consistent key shape (no time, no raw numeric values)
-      const key = JSON.stringify([
-        String(row[fields.user] ?? ''),
-        path,
-        schema,
-        fp,
-        statusRaw,
-      ]);
+      // Deduplicate by user, schema, and normalized query fingerprint
+      // so variations in HTTP path, referer, or status code do not cause duplicate rows.
+      const key = JSON.stringify([user, schema, fp]);
 
       if (!groups.has(key)) {
         groups.set(key, {
-          latestRow: { ...row, __count: 0 },           // Fix #4: seed with full row
-          queryTotal: 0, queryCount: 0, queryMax: -Infinity,   // Fix #5
-          responseTotal: 0, responseCount: 0, responseMax: -Infinity,
+          latestRow: { ...row, __count: 0 },
+          queryTotal: 0, queryCount: 0,
+          responseTotal: 0, responseCount: 0,
           latest: null,
         });
       }
@@ -522,15 +515,32 @@
         group.responseCount++;
       }
 
-      // Fix #4: replace the entire latestRow when a newer timestamp is found
       if (date && (!group.latest || date > group.latest)) {
         group.latest = date;
         const count = group.latestRow.__count;
+        const fallbackPath = group.latestRow[fields.path];
+        const fallbackRef = group.latestRow[fields.referer];
+        const fallbackStatus = group.latestRow[fields.status];
+        const fallbackNginxTime = group.latestRow[fields.nginxTime];
+        const fallbackLogName = group.latestRow.http_log_name;
+
         group.latestRow = { ...row, __count: count };
+
+        if (!group.latestRow[fields.path] && fallbackPath) group.latestRow[fields.path] = fallbackPath;
+        if (!group.latestRow[fields.referer] && fallbackRef) group.latestRow[fields.referer] = fallbackRef;
+        if (!group.latestRow[fields.status] && fallbackStatus) group.latestRow[fields.status] = fallbackStatus;
+        if (!group.latestRow[fields.nginxTime] && fallbackNginxTime) group.latestRow[fields.nginxTime] = fallbackNginxTime;
+        if (!group.latestRow.http_log_name && fallbackLogName) group.latestRow.http_log_name = fallbackLogName;
+      } else {
+        if (!group.latestRow[fields.path] && row[fields.path]) group.latestRow[fields.path] = row[fields.path];
+        if (!group.latestRow[fields.referer] && row[fields.referer]) group.latestRow[fields.referer] = row[fields.referer];
+        if (!group.latestRow[fields.status] && row[fields.status]) group.latestRow[fields.status] = row[fields.status];
+        if (!group.latestRow[fields.nginxTime] && row[fields.nginxTime]) group.latestRow[fields.nginxTime] = row[fields.nginxTime];
+        if (!group.latestRow.http_log_name && row.http_log_name) group.latestRow.http_log_name = row.http_log_name;
       }
     });
 
-    // Fix #6: sort by latest descending so newest rows appear first
+    // Sort by latest descending so newest rows appear first
     return [...groups.values()]
       .sort((a, b) => (b.latest?.getTime() ?? 0) - (a.latest?.getTime() ?? 0))
       .map((group) => {
@@ -641,9 +651,45 @@
     return { k1: 'Lainnya', k2: describe('Perintah lainnya'), tabel };
   }
 
+  function unwrapCountSubquery(text) {
+    let current = text;
+    while (true) {
+      const m = current.match(/^\s*SELECT\s+COUNT\s*\([^)]*\)\s*(?:AS\s+[`'"]?[a-zA-Z0-9_$]+[`'"]?)?\s+FROM\s*\(/i);
+      if (!m) break;
+      const startInner = m[0].length;
+      let depth = 1, quote = '', found = false;
+      for (let i = startInner; i < current.length; i++) {
+        const ch = current[i];
+        if (quote) {
+          if (ch === '\\') { i++; continue; }
+          if (ch === quote) quote = '';
+          continue;
+        }
+        if (ch === "'" || ch === '"' || ch === '`') { quote = ch; continue; }
+        if (ch === '(') depth++;
+        else if (ch === ')') {
+          depth--;
+          if (depth === 0) {
+            const inner = current.slice(startInner, i).trim();
+            if (/^SELECT\b/i.test(inner)) {
+              current = inner;
+              found = true;
+            }
+            break;
+          }
+        }
+      }
+      if (!found) break;
+    }
+    return current;
+  }
+
   function classifySelectedColumns(queryText) {
-    const text = cleanQuery(queryText || '');
+    let text = cleanQuery(queryText || '');
     if (!/^SELECT\b/i.test(text)) return { first: '-', last: '-' };
+    // Unwrap outer count wrappers (e.g. SELECT count(*) as rowcount/aggregate FROM (SELECT ...))
+    // so that the actual columns selected in the inner query are extracted.
+    text = unwrapCountSubquery(text);
     let depth = 0, quote = '', from = -1;
     for (let i = 6; i < text.length; i++) {
       const ch = text[i];
@@ -1203,7 +1249,7 @@
 
   function buildQueryDetailSheet(rows) {
     const ws = {};
-    const headers = ['logs_id', 'waktu_mysql', 'waktu_nginx', 'path', 'referer', 'klasifikasi_1', 'klasifikasi_2', 'klasifikasi_3', 'klasifikasi_4', 'klasifikasi_5', 'original_query'];
+    const headers = ['logs_id', 'waktu_mysql', 'waktu_nginx', '_log_name', 'path', 'referer', 'klasifikasi_1', 'klasifikasi_2', 'klasifikasi_3', 'klasifikasi_4', 'klasifikasi_5', 'original_query'];
     const rowHeights = [{ hpt: 26 }];
 
     // 1. Header row (tanpa warna / no fill)
@@ -1221,12 +1267,13 @@
       writeCell(ws, rowIdx, 0, r[fields.id] || idx + 1, EXCEL_STYLES.cellCenter, false);
       writeCell(ws, rowIdx, 1, r[fields.time] ?? '', EXCEL_STYLES.cellCenter, false);
       writeCell(ws, rowIdx, 2, r[fields.nginxTime] ?? '', EXCEL_STYLES.cellCenter, false);
-      writeCell(ws, rowIdx, 3, r[fields.path] ?? '', EXCEL_STYLES.cellLeft, false);
-      writeCell(ws, rowIdx, 4, r[fields.referer] ?? '', EXCEL_STYLES.cellLeft, false);
+      writeCell(ws, rowIdx, 3, r.http_log_name ?? '', EXCEL_STYLES.cellLeft, false);
+      writeCell(ws, rowIdx, 4, r[fields.path] ?? '', EXCEL_STYLES.cellLeft, false);
+      writeCell(ws, rowIdx, 5, r[fields.referer] ?? '', EXCEL_STYLES.cellLeft, false);
       [classes.k1, classes.k2, classes.tabel, selected.first, selected.last].forEach((value, col) => {
-        writeCell(ws, rowIdx, col + 5, value, EXCEL_STYLES.cellLeft, false);
+        writeCell(ws, rowIdx, col + 6, value, EXCEL_STYLES.cellLeft, false);
       });
-      writeCell(ws, rowIdx, 10, r[fields.query] ?? '', {
+      writeCell(ws, rowIdx, 11, r[fields.query] ?? '', {
         ...EXCEL_STYLES.cellLeft,
         alignment: { horizontal: 'left', vertical: 'center', wrapText: true }
       }, false);
@@ -1244,8 +1291,9 @@
     if (!window.XLSX) return showNotice('Library Excel belum termuat. Periksa koneksi internet lalu muat ulang halaman.');
     if (!state.displayRows.length) return showNotice('Tidak ada baris hasil filter untuk diunduh.');
     const columns = [
-      ['Merge Id', fields.id, 12],
+      ['Logs Id', fields.id, 12],
       ['Waktu MySQL', fields.time, 24], ['Waktu Nginx', fields.nginxTime, 24],
+      ['_log_name', 'http_log_name', 28],
       ['User MySQL', fields.user, 22], ['Schema', fields.schema, 20],
       ['Jumlah', '__count', 12], ['Query Time (detik)', fields.queryTime, 18],
       ['HTTP Status', fields.status, 14], ['Response Time (detik)', fields.responseTime, 22],

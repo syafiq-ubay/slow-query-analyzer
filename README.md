@@ -34,7 +34,7 @@ docker compose run --rm elastic-export nginx \
 
 ## Ambil kedua sumber dan gabungkan
 
-Timestamp pada file Excel ditampilkan dalam zona waktu Asia/Jakarta dengan format `MMM DD, YYYY @ HH:mm:ss.SSS`, contohnya `Oct 26, 2026 @ 08:56:50.238`. Mode `merge` mencocokkan `user` MySQL dengan akhiran `_log_name` Nginx setelah menormalkan awalan `api-`, tanda pemisah, dan akhiran versi seperti `v3`. Contohnya `simbcav3` cocok dengan `access.simbca-v3`, dan `hrdbcav3` dengan `access.api-hrdbca-v3`. `rt` Nginx harus setidaknya sebesar `query_time` MySQL dengan selisih maksimal 10 detik, dan jarak timestamp dibatasi hingga 10 detik. Jika ada beberapa kandidat valid, kandidat dengan timestamp terdekat dipilih. Untuk record lama yang tidak memiliki metadata tersebut, pencocokan waktu yang sama hingga detik tetap digunakan. Hasil merge menyertakan `_log_name` pada kolom `http_log_name`.
+Timestamp pada file Excel ditampilkan dalam zona waktu Asia/Jakarta dengan format `MMM DD, YYYY @ HH:mm:ss.SSS`, contohnya `Oct 26, 2026 @ 08:56:50.238`. Mode `merge` mencocokkan `user` MySQL dengan akhiran `_log_name` Nginx setelah menormalkan awalan `api-`, tanda pemisah, dan akhiran versi seperti `v3`. Contohnya `simbcav3` cocok dengan `access.simbca-v3`, dan `hrdbcav3` dengan `access.api-hrdbca-v3`. Timestamp Nginx wajib lebih besar dari timestamp MySQL dengan selisih maksimal 2 menit (`mysql_time < nginx_time <= mysql_time + 120s`). Syarat `rt` setidaknya sebesar `query_time` tetap berlaku. Jika beberapa kandidat memenuhi syarat, kandidat dengan timestamp terdekat dipilih. Hasil merge menyertakan `_log_name` pada kolom `http_log_name`.
 
 Hasil diurutkan dari waktu terbaru ke terlama, sehingga record terbaru muncul di bagian atas.
 
