@@ -8,6 +8,26 @@ from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 MAX_TIMESTAMP_GAP: float = 120.0  # seconds (2 menit)
 
+# Daftar user Nginx yang menjadi proxy/kandidat untuk user MySQL 'akange'.
+# Tidak ada log nginx access.akange, sehingga pencarian dilakukan di log-log ini.
+AKANGE_PROXY_USERS: frozenset = frozenset({"simbca", "simbcav3", "simcorn", "simpadi"})
+
+# Kata-kata SQL yang tidak relevan sebagai kata kunci path/referer matching.
+_SQL_STOP_WORDS: frozenset = frozenset({
+    "select", "from", "where", "and", "or", "not", "in", "is", "null",
+    "like", "between", "join", "left", "right", "inner", "outer", "on",
+    "group", "order", "by", "having", "limit", "offset", "union", "all",
+    "distinct", "as", "case", "when", "then", "else", "end", "into",
+    "values", "set", "update", "delete", "insert", "create", "drop",
+    "alter", "table", "index", "view", "exists", "count", "sum", "avg",
+    "min", "max", "coalesce", "ifnull", "if", "concat", "length", "trim",
+    "upper", "lower", "substring", "date", "year", "month", "day",
+    "now", "curdate", "timestamp", "cast", "convert", "char", "varchar",
+    "int", "bigint", "float", "double", "decimal", "bool", "boolean",
+    "true", "false", "asc", "desc", "with", "recursive", "rowcount",
+    "aggregate", "use", "database", "schema",
+})
+
 
 def parse_timestamp(value: Any) -> Optional[float]:
     if value is None or value == "":
@@ -55,16 +75,48 @@ def correlate_all(
         records.sort(key=lambda item: item[0])
         nginx_times_by_user[log_user] = [timestamp for timestamp, _ in records]
 
+    # Bangun pool gabungan Nginx untuk user 'akange'.
+    # Karena tidak ada log access.akange, kita cari di log proxy (simbca, simcorn, simpadi, dll).
+    akange_nginx_pool: List[tuple] = []
+    for proxy_user in AKANGE_PROXY_USERS:
+        akange_nginx_pool.extend(timed_nginx_by_user.get(proxy_user, []))
+    akange_nginx_pool.sort(key=lambda item: item[0])
+    akange_times: List[float] = [t for t, _ in akange_nginx_pool]
+
+    # Setiap MySQL record mencari pasangan Nginx-nya secara independen.
+    # Tidak ada prioritas antar user — kecocokan ditentukan murni oleh rules:
+    #   • timestamp window (mysql_time < nginx_time ≤ mysql_time + 120s)
+    #   • response time  (query_time ≤ rt ≤ query_time + 120)
+    #   • untuk akange: keyword query cocok ke path/referer Nginx
+    # Jika dua MySQL record dari user berbeda sama-sama memenuhi rules untuk
+    # satu Nginx record yang sama, keduanya valid dan muncul di output.
     for mysql in mysql_records:
         mysql_time = parse_timestamp(mysql.get("@timestamp"))
         user = _normal_user(mysql.get("user"))
         query_time = _duration(mysql.get("query_time"))
         closest_strict_match: Optional[Dict[str, Any]] = None
+
         if mysql_time is not None:
-            # Strict matches are indexed by normalized log user and sorted by
-            # timestamp. Scan candidate Nginx requests whose timestamps fall
-            # within (mysql_time, mysql_time + MAX_TIMESTAMP_GAP].
-            if user and query_time is not None:
+            if user == "akange" and query_time is not None:
+                # Strategi khusus akange: cari di pool proxy (simbca/simcorn/simpadi)
+                # lalu saring dengan kata kunci dari query SQL ke path/referer.
+                keywords = _extract_query_keywords(mysql.get("query", ""))
+                start = bisect_right(akange_times, mysql_time)
+                end = bisect_right(akange_times, mysql_time + MAX_TIMESTAMP_GAP)
+                for record_index in range(start, end):
+                    _, nginx = akange_nginx_pool[record_index]
+                    response_time = _duration(nginx.get("rt"))
+                    if response_time is None:
+                        continue
+                    if not (query_time <= response_time <= query_time + 120):
+                        continue
+                    # Keyword wajib cocok jika berhasil diekstrak.
+                    if keywords and not _akange_path_matches(nginx, keywords):
+                        continue
+                    closest_strict_match = nginx
+                    break
+            elif user and query_time is not None:
+                # User native: cari langsung di index log miliknya sendiri.
                 user_records = timed_nginx_by_user.get(user, [])
                 user_times = nginx_times_by_user.get(user, [])
                 start = bisect_right(user_times, mysql_time)
@@ -78,8 +130,7 @@ def correlate_all(
                         closest_strict_match = nginx
                         break
 
-        # Apply strict checks whenever the record contains the required
-        # metadata; exact-second matching remains for legacy/incomplete logs.
+        # Fallback: exact-second matching untuk record tanpa metadata lengkap.
         if closest_strict_match is not None:
             matches = [closest_strict_match]
         else:
@@ -187,6 +238,69 @@ def _needs_legacy_fallback(
         # All correlation fields exist, so an invalid timing pair must stay rejected.
         return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Fungsi helper khusus akange
+# ---------------------------------------------------------------------------
+
+_SQL_IDENTIFIER = re.compile(r"`?([a-zA-Z_][a-zA-Z0-9_]*)`?")
+# Karakter pemisah dalam URL path/referer
+_URL_SEG = re.compile(r"[^a-z0-9]+")
+
+
+def _extract_query_keywords(query: Any) -> frozenset:
+    """Ekstrak kata kunci bermakna dari teks SQL untuk dicocokkan ke path/referer Nginx.
+
+    Langkah-langkah:
+    1. Hapus preamble SET timestamp=... dan USE db;
+    2. Hapus string literal dan komentar agar tidak ada false positive
+    3. Ambil semua identifier SQL (nama tabel, kolom, alias)
+    4. Filter: hanya identifier >= 4 karakter dan bukan SQL stop word
+    """
+    if not query:
+        return frozenset()
+    text = str(query)
+    # Hapus preamble umum dari MySQL slow log
+    text = re.sub(r"(?i)^\s*SET\s+timestamp\s*=\s*\d+\s*;?\s*", "", text)
+    text = re.sub(r"(?i)^\s*USE\s+\w+\s*;?\s*", "", text)
+    # Hapus string literal agar isinya tidak ikut diekstrak
+    text = re.sub(r"'(?:''|\\'|[^'])*'", " ", text)
+    text = re.sub(r'"(?:""|\\"|[^"])*"', " ", text)
+    # Hapus komentar SQL
+    text = re.sub(r"/\*[\s\S]*?\*/", " ", text)
+    text = re.sub(r"--[^\r\n]*", " ", text)
+    text = re.sub(r"#[^\r\n]*", " ", text)
+    # Ekstrak identifier
+    identifiers: set = set()
+    for m in _SQL_IDENTIFIER.finditer(text):
+        word = m.group(1).lower()
+        if len(word) >= 4 and word not in _SQL_STOP_WORDS:
+            identifiers.add(word)
+    return frozenset(identifiers)
+
+
+def _akange_path_matches(nginx: Dict[str, Any], keywords: frozenset) -> bool:
+    """Cek apakah path atau referer Nginx mengandung setidaknya satu kata kunci query.
+
+    Kata kunci dicocokkan sebagai substring setelah membagi URL path menjadi
+    segmen-segmen kecil (pisah berdasarkan karakter non-alfanumerik).
+    """
+    path = str(nginx.get("path") or "").lower()
+    referer = str(nginx.get("referer") or "").lower()
+    combined = path + " " + referer
+    # Bagi URL menjadi token (segmen path, parameter, dll.)
+    segments = set(_URL_SEG.split(combined))
+    # Cocokkan: keyword ada di salah satu segmen, ATAU segmen ada di dalam keyword
+    # (menangani kasus keyword lebih panjang dari segmen, misal 'ttbsks' vs 'ttbs-ks')
+    for kw in keywords:
+        if kw in combined:
+            return True
+        # Cek juga apakah keyword merupakan substring dari segmen path gabungan
+        for seg in segments:
+            if seg and len(seg) >= 4 and seg in kw:
+                return True
+    return False
 
 
 _SQL_STRING = re.compile(r"'(?:''|\\.|[^'])*'|\"(?:\"\"|\\.|[^\"])*\"")
